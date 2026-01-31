@@ -6,8 +6,8 @@ UART Communication Manager for Raspberry Pi 5
 Communicates with STM32 using fixed 5-byte packets with checksum validation.
 
 Protocol:
-    RX (from STM32): [START_TX, STATUS, DATA_L, DATA_H, CHECKSUM]
-    TX (to STM32):   [START_RX, CMD, PARAM1, PARAM2, CHECKSUM]
+    RX (from STM32): [START_RX, STATUS, DATA_L, DATA_H, CHECKSUM]
+    TX (to STM32):   [START_TX, CMD, PARAM1, PARAM2, CHECKSUM]
 
 Author: Ficio Prep Team
 Date: January 2026
@@ -17,17 +17,17 @@ import serial
 import threading
 import time
 import logging
-from typing import Optional, Callable, Dict, Tuple
+from typing import Optional, Callable, Dict
 from dataclasses import dataclass
 from enum import IntEnum
 
 
 # ============================================================================
-# PROTOCOL CONSTANTS (must match STM32 comms_manager.h)
+# PROTOCOL CONSTANTS
 # ============================================================================
 
 class ProtocolConstants:
-    """Protocol constants matching STM32 definitions"""
+    """Protocol constants for 5-byte packet structure"""
     PACKET_SIZE = 5
     
     # Start bytes
@@ -50,36 +50,55 @@ class ProtocolConstants:
 
 
 class CommandCode(IntEnum):
-    """Command codes for STM32 (must match STM32 definitions)"""
-    # Gate commands
-    CMD_GATE_TRIGGER = 0x10
-    CMD_GATE_STATUS = 0x11
-    CMD_GATE_ABORT = 0x12
+    """Command codes for STM32"""
     
-    # Cutter commands
-    CMD_CUTTER_CYCLE = 0x20
-    CMD_CUTTER_RESET = 0x21
-    CMD_CUTTER_STATUS = 0x22
+    # ==================== GATE COMMANDS (0x10 - 0x1F) ====================
+    CMD_GATE_OPEN = 0x10        # PARAM1: gate_id (1-6), PARAM2: unused
+    CMD_GATE_CLOSE = 0x11       # PARAM1: gate_id (1-6), PARAM2: unused
+    CMD_GATE_CYCLE = 0x12       # PARAM1: gate_id (1-6), PARAM2: unused
+    CMD_HOPPER_DISPENSE = 0x13  # PARAM1: hopper_id (1-4), PARAM2: unused
+                                # (includes vibration + smart laser detection)
     
-    # Vibration commands
-    CMD_VIB_SET = 0x30
+    # ==================== CUTTER COMMANDS (0x20 - 0x2F) ====================
+    CMD_CUT_EXECUTE = 0x20      # PARAM1: axis bitmask (bit0=X, bit1=Y, bit2=Z)
+    CMD_CUT_HOME = 0x21         # Home all cutter axes
+    CMD_CUT_ABORT = 0x22        # Emergency stop cutters
     
-    # Scale commands
-    CMD_SCALE_READ = 0x40
-    CMD_SCALE_TARE = 0x41
+    # ==================== VIBRATION COMMANDS (0x30 - 0x3F) ====================
+    CMD_VIB_SET = 0x30          # PARAM1: hopper_id (1-4), PARAM2: state (0=off, 1=on)
+    CMD_VIB_ALL_OFF = 0x31      # Turn off all vibration motors
     
-    # System commands
-    CMD_PING = 0x50
-    CMD_EMERGENCY_STOP = 0x55
+    # ==================== SCALE COMMANDS (0x40 - 0x4F) ====================
+    CMD_SCALE_READ = 0x40       # Returns weight in grams (0-20000)
+    CMD_SCALE_TARE = 0x41       # Zero the scale
+    CMD_SCALE_CALIBRATE = 0x42  # PARAM1: cal_mode, PARAM2: unused
+    
+    # ==================== STATUS/QUERY COMMANDS (0x50 - 0x5F) ====================
+    CMD_GET_HOPPER_STATUS = 0x50  # Returns bitmask: bit0-3 = empty for hoppers 1-4
+    CMD_GET_GATE_STATUS = 0x51    # PARAM1: gate_id, Returns: 0=closed, 1=open, 2=moving
+    CMD_PING = 0x53               # PARAM1/2: echo values
+    
+    # ==================== SYSTEM COMMANDS (0xF0 - 0xFF) ====================
+    CMD_EMERGENCY_STOP = 0xF0   # Stop all motion immediately
+    CMD_RESET_SYSTEM = 0xF1     # Software reset
 
 
 class ResponseStatus(IntEnum):
-    """Response status codes from STM32 (must match STM32 definitions)"""
-    RESP_OK = 0x00
-    RESP_ERR_PARAM = 0x01
-    RESP_ERR_BUSY = 0x02
-    RESP_ERR_SENSOR = 0x03
-    RESP_ERR_UNKNOWN_CMD = 0x0F
+    """Response status codes from STM32"""
+    RESP_OK = 0x00              # Success
+    RESP_BUSY = 0x01            # Device busy
+    RESP_INVALID_PARAM = 0x02   # Invalid parameter
+    RESP_HARDWARE_ERROR = 0x03  # Hardware fault
+    RESP_TIMEOUT = 0x04         # Operation timeout
+    RESP_UNKNOWN_CMD = 0x0F     # Unknown command
+
+
+# Axis bitmasks for cutter commands
+class CutterAxis(IntEnum):
+    """Bitmask values for cutter axes"""
+    AXIS_X = 0b001  # Cutter 1 (Vertical X)
+    AXIS_Y = 0b010  # Cutter 2 (Vertical Y)
+    AXIS_Z = 0b100  # Cutter 3 (Horizontal Z)
 
 
 @dataclass
@@ -382,7 +401,7 @@ class RaspiCommsManager:
 
 
 # ============================================================================
-# CONVENIENCE FUNCTIONS
+# HIGH-LEVEL INTERFACE
 # ============================================================================
 
 class STM32Interface:
@@ -394,6 +413,8 @@ class STM32Interface:
     def __init__(self, comms: RaspiCommsManager):
         self.comms = comms
         self.logger = logging.getLogger('STM32Interface')
+    
+    # ==================== SYSTEM COMMANDS ====================
     
     def ping(self, echo_value: int = 0x1234) -> bool:
         """
@@ -437,67 +458,211 @@ class STM32Interface:
         self.logger.error("Emergency stop failed")
         return False
     
-    def read_scale(self) -> Optional[float]:
-        """
-        Read weight from scale.
-        
-        Returns:
-            Weight in grams, or None if error
-        """
-        resp = self.comms.send_command(CommandCode.CMD_SCALE_READ)
-        
-        if resp:
-            if resp.status == ResponseStatus.RESP_OK:
-                return float(resp.data)  # Data is in grams
-            elif resp.status == ResponseStatus.RESP_ERR_BUSY:
-                self.logger.warning("Scale busy")
-            elif resp.status == ResponseStatus.RESP_ERR_SENSOR:
-                self.logger.error("Scale sensor error")
-        
-        return None
+    def reset_system(self) -> bool:
+        """Reset STM32 system."""
+        resp = self.comms.send_command(CommandCode.CMD_RESET_SYSTEM)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
     
-    def tare_scale(self) -> bool:
+    # ==================== GATE COMMANDS ====================
+    
+    def gate_open(self, gate_id: int) -> bool:
         """
-        Tare the scale.
+        Open a gate.
+        
+        Args:
+            gate_id: Gate number (1-6)
+                1-2: Cutter gates (top/bottom)
+                3-6: Hopper gates (hoppers 1-4)
         
         Returns:
             True if successful
         """
-        resp = self.comms.send_command(CommandCode.CMD_SCALE_TARE)
-        return resp is not None and resp.status == ResponseStatus.RESP_OK
+        resp = self.comms.send_command(CommandCode.CMD_GATE_OPEN, gate_id)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            self.logger.debug(f"Gate {gate_id} opened")
+            return True
+        return False
     
-    def trigger_gate(self, gate_id: int) -> bool:
-        """
-        Trigger a gate (1-4).
-        
-        Returns:
-            True if successful
-        """
-        resp = self.comms.send_command(CommandCode.CMD_GATE_TRIGGER, gate_id)
-        return resp is not None and resp.status == ResponseStatus.RESP_OK
+    def gate_close(self, gate_id: int) -> bool:
+        """Close a gate."""
+        resp = self.comms.send_command(CommandCode.CMD_GATE_CLOSE, gate_id)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            self.logger.debug(f"Gate {gate_id} closed")
+            return True
+        return False
+    
+    def gate_cycle(self, gate_id: int) -> bool:
+        """Cycle a gate (open then close)."""
+        resp = self.comms.send_command(CommandCode.CMD_GATE_CYCLE, gate_id)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            self.logger.debug(f"Gate {gate_id} cycled")
+            return True
+        return False
     
     def get_gate_status(self, gate_id: int) -> Optional[int]:
         """
         Get gate status.
         
         Returns:
-            Status byte, or None if error
+            0 = closed, 1 = open, 2 = moving, None = error
         """
-        resp = self.comms.send_command(CommandCode.CMD_GATE_STATUS, gate_id)
-        
+        resp = self.comms.send_command(CommandCode.CMD_GET_GATE_STATUS, gate_id)
         if resp and resp.status == ResponseStatus.RESP_OK:
             return resp.data
-        
         return None
     
-    def set_vibration(self, enable: bool) -> bool:
+    # ==================== HOPPER COMMANDS ====================
+    
+    def hopper_dispense(self, hopper_id: int) -> bool:
         """
-        Enable/disable vibration.
+        Dispense one item from hopper (smart dispense with laser detection).
+        
+        Args:
+            hopper_id: Hopper number (1-4)
         
         Returns:
             True if successful
         """
-        resp = self.comms.send_command(CommandCode.CMD_VIB_SET, 1 if enable else 0)
+        resp = self.comms.send_command(CommandCode.CMD_HOPPER_DISPENSE, hopper_id)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            self.logger.info(f"Hopper {hopper_id} dispensed item")
+            return True
+        elif resp and resp.status == ResponseStatus.RESP_TIMEOUT:
+            self.logger.warning(f"Hopper {hopper_id} dispense timeout (possibly empty)")
+        return False
+    
+    def get_hopper_status(self) -> Optional[int]:
+        """
+        Get hopper empty status.
+        
+        Returns:
+            Bitmask where bit0-3 represent empty status for hoppers 1-4
+            1 = empty, 0 = has items
+            None if error
+        """
+        resp = self.comms.send_command(CommandCode.CMD_GET_HOPPER_STATUS)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            return resp.data
+        return None
+    
+    def is_hopper_empty(self, hopper_id: int) -> bool:
+        """
+        Check if specific hopper is empty.
+        
+        Args:
+            hopper_id: Hopper number (1-4)
+        
+        Returns:
+            True if empty, False if has items or error
+        """
+        status = self.get_hopper_status()
+        if status is not None:
+            bit_position = hopper_id - 1
+            return (status & (1 << bit_position)) != 0
+        return False
+    
+    # ==================== CUTTER COMMANDS ====================
+    
+    def cut_execute(self, axis_bitmask: int) -> bool:
+        """
+        Execute cut on specified axes.
+        
+        Args:
+            axis_bitmask: Bitmask for axes
+                bit0 (0x01): X-axis (Cutter 1 - Vertical X)
+                bit1 (0x02): Y-axis (Cutter 2 - Vertical Y)
+                bit2 (0x04): Z-axis (Cutter 3 - Horizontal Z)
+                
+                Examples:
+                    0x04 (0b100): Z-axis only (horizontal slice)
+                    0x03 (0b011): X+Y axes (for cubed)
+                    0x07 (0b111): All axes
+        
+        Returns:
+            True if successful
+        """
+        resp = self.comms.send_command(CommandCode.CMD_CUT_EXECUTE, axis_bitmask)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            self.logger.info(f"Cut executed on axes: 0b{axis_bitmask:03b}")
+            return True
+        return False
+    
+    def cut_home(self) -> bool:
+        """Home all cutter axes."""
+        resp = self.comms.send_command(CommandCode.CMD_CUT_HOME)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+    
+    def cut_abort(self) -> bool:
+        """Emergency abort all cutter motion."""
+        resp = self.comms.send_command(CommandCode.CMD_CUT_ABORT)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+    
+    # ==================== VIBRATION COMMANDS ====================
+    
+    def vibration_set(self, hopper_id: int, state: bool) -> bool:
+        """
+        Set vibration motor state for a hopper.
+        
+        Args:
+            hopper_id: Hopper number (1-4)
+            state: True = on, False = off
+        
+        Returns:
+            True if successful
+        """
+        resp = self.comms.send_command(CommandCode.CMD_VIB_SET, hopper_id, 1 if state else 0)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+    
+    def vibration_all_off(self) -> bool:
+        """Turn off all vibration motors."""
+        resp = self.comms.send_command(CommandCode.CMD_VIB_ALL_OFF)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+    
+    # ==================== SCALE COMMANDS ====================
+    
+    def scale_read(self) -> Optional[float]:
+        """
+        Read weight from scale.
+        
+        Returns:
+            Weight in grams (0-20000), or None if error
+        """
+        resp = self.comms.send_command(CommandCode.CMD_SCALE_READ)
+        
+        if resp:
+            if resp.status == ResponseStatus.RESP_OK:
+                return float(resp.data)  # Data is in grams
+            elif resp.status == ResponseStatus.RESP_BUSY:
+                self.logger.warning("Scale busy")
+            elif resp.status == ResponseStatus.RESP_HARDWARE_ERROR:
+                self.logger.error("Scale hardware error")
+        
+        return None
+    
+    def scale_tare(self) -> bool:
+        """
+        Tare (zero) the scale.
+        
+        Returns:
+            True if successful
+        """
+        resp = self.comms.send_command(CommandCode.CMD_SCALE_TARE)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            self.logger.info("Scale tared")
+            return True
+        return False
+    
+    def scale_calibrate(self, cal_mode: int = 0) -> bool:
+        """
+        Calibrate scale.
+        
+        Args:
+            cal_mode: Calibration mode (0 = default)
+        
+        Returns:
+            True if successful
+        """
+        resp = self.comms.send_command(CommandCode.CMD_SCALE_CALIBRATE, cal_mode)
         return resp is not None and resp.status == ResponseStatus.RESP_OK
 
 
@@ -535,9 +700,18 @@ def main():
         else:
             print("✗ Ping failed")
         
+        # Test hopper status
+        print("\n=== Testing Hopper Status ===")
+        status = stm32.get_hopper_status()
+        if status is not None:
+            print(f"✓ Hopper status: 0b{status:04b}")
+            for i in range(1, 5):
+                empty = stm32.is_hopper_empty(i)
+                print(f"  Hopper {i}: {'EMPTY' if empty else 'HAS ITEMS'}")
+        
         # Test scale reading
         print("\n=== Testing Scale ===")
-        weight = stm32.read_scale()
+        weight = stm32.scale_read()
         if weight is not None:
             print(f"✓ Scale reading: {weight:.1f}g")
         else:

@@ -1,0 +1,430 @@
+"""
+standard_workflow.py
+
+Single parameterized workflow for all vegetable types.
+Driven by VegetableConfig and runtime bay selection.
+
+Implements the standard processing sequence from Technical Specifications Page 2:
+1. Dispense from bay
+2. CV analysis in staging area
+3. If accepted: enter cutting chamber, cut, exit
+4. Repeat until target reached or bay empty
+
+Author: Ficio Prep Team
+Date: January 2026
+"""
+
+import asyncio
+from typing import Optional
+
+from .base_workflow import BaseWorkflow, WorkflowEvent, HardwareError, CVError
+from backend.config import get_config, VegetableConfig, CutTypeConfig
+
+
+class StandardVegetableWorkflow(BaseWorkflow):
+    """
+    Single parameterized workflow for all vegetable processing.
+    
+    This workflow is driven by:
+    - VegetableConfig: Defines the vegetable type, CV models, supported cuts
+    - bay_id: Runtime-selected bay (1-4) where the vegetable is loaded
+    - cut_type: Selected cut type (must be in vegetable's supported_cuts)
+    
+    No subclassing needed - all vegetables follow the same processing sequence.
+    """
+    
+    def __init__(
+        self,
+        stm32_interface,
+        cv_manager,
+        vegetable_config: VegetableConfig,
+        bay_id: int,
+        cut_type: str,
+        target_count: int = 50,
+        update_callback: Optional[callable] = None
+    ):
+        """
+        Initialize standard vegetable workflow.
+        
+        Args:
+            stm32_interface: STM32Interface for hardware control
+            cv_manager: CameraManager for CV processing
+            vegetable_config: Configuration for the vegetable type
+            bay_id: Bay number (1-4) where vegetable is loaded
+            cut_type: Cut type name (e.g., "sliced", "cubed")
+            target_count: Number of items to process
+            update_callback: Callback for status updates
+        
+        Raises:
+            ValueError: If bay_id is invalid or cut_type not supported
+        """
+        super().__init__(stm32_interface, cv_manager, update_callback)
+        
+        # Get configuration
+        self.config = get_config()
+        
+        # Validate bay_id
+        num_bays = self.config.get_int('num_bays', 4)
+        if bay_id < 1 or bay_id > num_bays:
+            raise ValueError(f"Invalid bay_id: {bay_id} (must be 1-{num_bays})")
+        
+        # Validate cut_type is supported
+        if cut_type not in vegetable_config.supported_cuts:
+            raise ValueError(
+                f"Cut type '{cut_type}' not supported for {vegetable_config.name}. "
+                f"Supported: {vegetable_config.supported_cuts}"
+            )
+        
+        # Get cut type configuration
+        cut_config = self.config.get_cut_type(cut_type)
+        if not cut_config:
+            raise ValueError(f"Unknown cut type: {cut_type}")
+        
+        # Workflow configuration
+        self.vegetable_config = vegetable_config
+        self.bay_id = bay_id
+        self.cut_config = cut_config
+        self.target_count = target_count
+        
+        # Workflow metadata
+        self.workflow_name = f"{vegetable_config.name} {cut_config.display_name}"
+        self.vegetable_type = vegetable_config.id
+        self.cut_type = cut_type
+        
+        # Hardware mappings
+        self.gate_cutter_top = 1    # Top cutter gate (entry)
+        self.gate_cutter_bottom = 2  # Bottom cutter gate (exit)
+        self.gate_bay = self.config.get_gate_for_bay(bay_id)  # Bay gate (3-6)
+        
+        # State tracking
+        self.current_item = 0
+        self.consecutive_cv_failures = 0
+        self.bay_empty = False
+        self.total_weight_processed = 0.0
+        
+        # Timing configuration from config
+        self.staging_delay = self.config.get_float('staging_delay', 0.3)
+        self.gate_delay = self.config.get_float('gate_delay', 0.2)
+        self.cut_delay = self.config.get_float('cut_delay', 0.5)
+        self.max_cv_failures = self.config.get_int('max_consecutive_cv_failures', 5)
+        
+        self.logger.info(
+            f"StandardWorkflow initialized: {self.workflow_name}, "
+            f"bay={bay_id}, target={target_count}, "
+            f"cut_mask=0b{cut_config.axis_bitmask:03b}"
+        )
+    
+    # ========================================================================
+    # WORKFLOW IMPLEMENTATION (Standard Processing Sequence)
+    # ========================================================================
+    
+    async def setup(self):
+        """
+        Initialize workflow - tare scale, verify bay, close gates.
+        
+        Implements pre-workflow setup as per spec.
+        """
+        self.logger.info(f"Setting up {self.workflow_name} workflow...")
+        
+        # Tare the scale
+        self.logger.info("Taring scale...")
+        if not self.stm32.scale_tare():
+            raise HardwareError("Failed to tare scale")
+        
+        await self._wait_async(0.5)
+        
+        # Verify bay is not empty
+        if self.stm32.is_hopper_empty(self.bay_id):
+            self.bay_empty = True
+            raise HardwareError(f"Bay {self.bay_id} is empty")
+        
+        # Ensure gates are closed
+        self.logger.info("Closing gates...")
+        self.stm32.gate_close(self.gate_cutter_top)
+        await self._wait_async(self.gate_delay)
+        self.stm32.gate_close(self.gate_cutter_bottom)
+        await self._wait_async(self.gate_delay)
+        
+        self.logger.info("Setup complete")
+    
+    async def process_single_item(self) -> bool:
+        """
+        Process one item through the standard workflow sequence.
+        
+        Standard Processing Sequence (from spec Page 2):
+        1. Dispense: Vegetable falls from bay into staging area
+        2. CV Analysis: Overhead camera captures static image
+        3. Validation: If "Accepted", top gate opens; vegetable enters chamber
+        4. Cut: Execute cut cycle
+        5. Exit: Bottom gate opens to release product
+        
+        Returns:
+            True if successfully processed, False if error or rejected
+        """
+        item_num = self.current_item + 1
+        self.logger.info(f"=== Processing item {item_num}/{self.target_count} ===")
+        
+        try:
+            # Step 1: Dispense from bay into staging area
+            if not await self._dispense_from_bay():
+                return False
+            
+            # Step 2: Wait for settling in staging area
+            await self._wait_async(self.staging_delay)
+            
+            # Step 3: Run CV analysis
+            cv_result = await self._run_cv_check()
+            
+            if not cv_result['accepted']:
+                # Rejected by CV
+                self.cv_rejected_items += 1
+                self.consecutive_cv_failures += 1
+                
+                await self._emit_event(
+                    WorkflowEvent.CV_REJECTED,
+                    {
+                        "item": item_num,
+                        "reason": cv_result.get('reason', 'quality'),
+                        "confidence": cv_result.get('confidence', 0.0),
+                        "bay_id": self.bay_id
+                    }
+                )
+                
+                self.logger.warning(
+                    f"Item {item_num} rejected by CV: {cv_result.get('reason', 'unknown')}"
+                )
+                
+                # TODO: Dispense to waste bin (future feature)
+                return False
+            
+            # Reset consecutive failure counter on success
+            self.consecutive_cv_failures = 0
+            
+            # Step 4: Execute cutting sequence
+            if not await self._execute_cut():
+                return False
+            
+            # Step 5: Read scale for telemetry
+            weight = self.stm32.scale_read()
+            if weight is not None:
+                self.total_weight_processed += weight
+                await self._emit_event(
+                    WorkflowEvent.WEIGHT_UPDATE,
+                    {"total_weight": self.total_weight_processed}
+                )
+            
+            self.current_item += 1
+            self.logger.info(f"Item {item_num} completed successfully")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error processing item {item_num}: {e}", exc_info=True)
+            return False
+    
+    async def should_continue(self) -> bool:
+        """
+        Check if workflow should continue.
+        
+        Stop conditions:
+        - Target count reached
+        - Bay empty
+        - Too many consecutive CV failures
+        
+        Returns:
+            False if any stop condition is met
+        """
+        # Check target reached
+        if self.current_item >= self.target_count:
+            self.logger.info(f"Target of {self.target_count} items reached")
+            return False
+        
+        # Check bay empty
+        if self.stm32.is_hopper_empty(self.bay_id):
+            self.bay_empty = True
+            await self._emit_event(WorkflowEvent.BAY_EMPTY, {"bay_id": self.bay_id})
+            self.logger.warning(f"Bay {self.bay_id} is empty")
+            return False
+        
+        # Check consecutive CV failures (safety)
+        if self.consecutive_cv_failures >= self.max_cv_failures:
+            self.logger.error(
+                f"Too many consecutive CV failures ({self.consecutive_cv_failures}). "
+                "Stopping workflow."
+            )
+            await self._emit_event(
+                WorkflowEvent.ERROR,
+                {"message": "Too many consecutive CV failures"}
+            )
+            return False
+        
+        return True
+    
+    async def cleanup(self):
+        """Clean up after workflow completion."""
+        self.logger.info("Cleaning up...")
+        
+        # Turn off all vibration (if it was enabled)
+        self.stm32.vibration_all_off()
+        
+        # Close all gates
+        self.stm32.gate_close(self.gate_cutter_top)
+        await self._wait_async(self.gate_delay)
+        self.stm32.gate_close(self.gate_cutter_bottom)
+        
+        # Read final weight
+        final_weight = self.stm32.scale_read()
+        if final_weight is not None:
+            self.logger.info(f"Total weight processed: {self.total_weight_processed:.1f}g")
+        
+        self.logger.info("Cleanup complete")
+    
+    # ========================================================================
+    # PRIVATE HELPER METHODS
+    # ========================================================================
+    
+    async def _dispense_from_bay(self) -> bool:
+        """
+        Dispense one item from the bay.
+        
+        Uses CMD_HOPPER_DISPENSE which includes vibration and smart laser detection.
+        
+        Returns:
+            True if successful, False if error
+        """
+        self.logger.info(f"Dispensing from bay {self.bay_id}...")
+        
+        await self._emit_event(
+            WorkflowEvent.ITEM_DISPENSED,
+            {"bay_id": self.bay_id}
+        )
+        
+        # Hopper dispense includes vibration and smart laser detection
+        success = self.stm32.hopper_dispense(self.bay_id)
+        
+        if not success:
+            self.logger.error(f"Failed to dispense from bay {self.bay_id}")
+            return False
+        
+        self.logger.debug("Dispense successful")
+        return True
+    
+    async def _run_cv_check(self) -> dict:
+        """
+        Run computer vision analysis on staged item.
+        
+        Uses the vegetable-specific CV models defined in config.
+        
+        Returns:
+            Dictionary with keys:
+                - accepted: bool
+                - confidence: float (0-1)
+                - reason: str (if rejected)
+        """
+        self.logger.info("Running CV analysis...")
+        
+        await self._emit_event(WorkflowEvent.CV_CHECK_STARTED)
+        
+        try:
+            # Run CV analysis with vegetable config
+            cv_result = await self.cv.analyze_vegetable(
+                vegetable_config=self.vegetable_config,
+                bay_id=self.bay_id
+            )
+            
+            await self._emit_event(
+                WorkflowEvent.CV_CHECK_COMPLETED,
+                {
+                    "accepted": cv_result['accepted'],
+                    "confidence": cv_result['confidence'],
+                    "healthy": cv_result.get('healthy', True),
+                    "bay_id": self.bay_id
+                }
+            )
+            
+            if cv_result['accepted']:
+                self.logger.info(
+                    f"CV ACCEPT: confidence={cv_result['confidence']:.2f}, "
+                    f"healthy={cv_result.get('healthy', True)}"
+                )
+            else:
+                self.logger.warning(
+                    f"CV REJECT: reason={cv_result.get('reason', 'unknown')}, "
+                    f"confidence={cv_result['confidence']:.2f}"
+                )
+            
+            return cv_result
+            
+        except Exception as e:
+            self.logger.error(f"CV analysis error: {e}", exc_info=True)
+            raise CVError(f"CV analysis failed: {e}")
+    
+    async def _execute_cut(self) -> bool:
+        """
+        Execute the cutting sequence.
+        
+        Standard cutting sequence (from spec Page 2):
+        1. Open top gate (entry to cutting chamber)
+        2. Wait for item to enter
+        3. Close top gate
+        4. Execute cut (using axis bitmask from cut config)
+        5. Open bottom gate (exit)
+        6. Wait for product to exit
+        7. Close bottom gate
+        
+        Returns:
+            True if successful, False if error
+        """
+        self.logger.info("Executing cutting sequence...")
+        
+        await self._emit_event(WorkflowEvent.CUTTING_STARTED)
+        
+        try:
+            # Open top gate (entry)
+            self.logger.debug("Opening top gate...")
+            if not self.stm32.gate_open(self.gate_cutter_top):
+                raise HardwareError("Failed to open top gate")
+            
+            await self._wait_async(self.gate_delay)
+            
+            # Close top gate
+            self.logger.debug("Closing top gate...")
+            if not self.stm32.gate_close(self.gate_cutter_top):
+                raise HardwareError("Failed to close top gate")
+            
+            await self._wait_async(self.gate_delay)
+            
+            # Execute cut using configured axis bitmask
+            self.logger.debug(
+                f"Executing cut (bitmask: 0b{self.cut_config.axis_bitmask:03b})..."
+            )
+            if not self.stm32.cut_execute(self.cut_config.axis_bitmask):
+                raise HardwareError("Failed to execute cut")
+            
+            await self._wait_async(self.cut_delay)
+            
+            # Open bottom gate (exit)
+            self.logger.debug("Opening bottom gate...")
+            if not self.stm32.gate_open(self.gate_cutter_bottom):
+                raise HardwareError("Failed to open bottom gate")
+            
+            await self._wait_async(self.gate_delay)
+            
+            # Close bottom gate
+            self.logger.debug("Closing bottom gate...")
+            if not self.stm32.gate_close(self.gate_cutter_bottom):
+                raise HardwareError("Failed to close bottom gate")
+            
+            await self._emit_event(WorkflowEvent.CUTTING_COMPLETED)
+            
+            self.logger.info("Cutting sequence complete")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Cutting sequence error: {e}", exc_info=True)
+            return False
+    
+    def get_progress_percent(self) -> float:
+        """Get workflow progress as percentage."""
+        if self.target_count == 0:
+            return 100.0
+        return round((self.current_item / self.target_count) * 100, 1)
