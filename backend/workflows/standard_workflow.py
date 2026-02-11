@@ -15,7 +15,7 @@ Date: January 2026
 """
 
 import asyncio
-from typing import Optional
+from typing import Optional, Dict
 
 from .base_workflow import BaseWorkflow, WorkflowEvent, HardwareError, CVError
 from backend.config import get_config, VegetableConfig, CutTypeConfig
@@ -102,6 +102,11 @@ class StandardVegetableWorkflow(BaseWorkflow):
         self.bay_empty = False
         self.total_weight_processed = 0.0
         
+        # Prefetch state for pipeline optimization
+        self._prefetch_task: Optional[asyncio.Task] = None
+        self._prefetch_result: Optional[Dict] = None
+        self._prefetch_item_number: Optional[int] = None
+        
         # Timing configuration from config
         self.staging_delay = self.config.get_float('staging_delay', 0.3)
         self.gate_delay = self.config.get_float('gate_delay', 0.2)
@@ -151,12 +156,17 @@ class StandardVegetableWorkflow(BaseWorkflow):
         """
         Process one item through the standard workflow sequence.
         
+        Uses pipelined processing: while current item is cutting, the next item
+        is dispensed and CV-checked in parallel. Prefetch starts AFTER the top
+        gate closes to prevent items from falling into an open gate.
+        
         Standard Processing Sequence (from spec Page 2):
         1. Dispense: Vegetable falls from bay into staging area
         2. CV Analysis: Overhead camera captures static image
         3. Validation: If "Accepted", top gate opens; vegetable enters chamber
-        4. Cut: Execute cut cycle
-        5. Exit: Bottom gate opens to release product
+        4. Top gate closes (SAFE to dispense next item now)
+        5. Cut: Execute cut cycle (while prefetching next item in parallel)
+        6. Exit: Bottom gate opens to release product
         
         Returns:
             True if successfully processed, False if error or rejected
@@ -165,16 +175,26 @@ class StandardVegetableWorkflow(BaseWorkflow):
         self.logger.info(f"=== Processing item {item_num}/{self.target_count} ===")
         
         try:
-            # Step 1: Dispense from bay into staging area
-            if not await self._dispense_from_bay():
-                return False
+            # Check if we have a prefetched result from previous iteration
+            if self._prefetch_result and self._prefetch_item_number == item_num:
+                self.logger.debug(f"Using prefetched CV result for item {item_num}")
+                cv_result = self._prefetch_result
+                # Clear prefetch state
+                self._prefetch_result = None
+                self._prefetch_item_number = None
+            else:
+                # No prefetch available, do it now (first item or prefetch failed)
+                # Step 1: Dispense from bay into staging area
+                if not await self._dispense_from_bay():
+                    return False
+                
+                # Step 2: Wait for settling in staging area
+                await self._wait_async(self.staging_delay)
+                
+                # Step 3: Run CV analysis
+                cv_result = await self._run_cv_check()
             
-            # Step 2: Wait for settling in staging area
-            await self._wait_async(self.staging_delay)
-            
-            # Step 3: Run CV analysis
-            cv_result = await self._run_cv_check()
-            
+            # Validate CV result
             if not cv_result['accepted']:
                 # Rejected by CV
                 self.cv_rejected_items += 1
@@ -195,6 +215,10 @@ class StandardVegetableWorkflow(BaseWorkflow):
                 )
                 
                 # TODO: Dispense to waste bin (future feature)
+                
+                # Start prefetching next item before returning
+                await self._start_prefetch_next_item(item_num + 1)
+                
                 return False
             
             # Reset consecutive failure counter on success
@@ -262,6 +286,14 @@ class StandardVegetableWorkflow(BaseWorkflow):
     async def cleanup(self):
         """Clean up after workflow completion."""
         self.logger.info("Cleaning up...")
+        
+        # Cancel any pending prefetch task
+        if self._prefetch_task and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
+            try:
+                await self._prefetch_task
+            except asyncio.CancelledError:
+                pass
         
         # Turn off all vibration (if it was enabled)
         self.stm32.vibration_all_off()
@@ -366,10 +398,11 @@ class StandardVegetableWorkflow(BaseWorkflow):
         1. Open top gate (entry to cutting chamber)
         2. Wait for item to enter
         3. Close top gate
-        4. Execute cut (using axis bitmask from cut config)
-        5. Open bottom gate (exit)
-        6. Wait for product to exit
-        7. Close bottom gate
+        4. **START PREFETCH (safe now - gate is closed)**
+        5. Execute cut (while prefetch runs in parallel)
+        6. Open bottom gate (exit)
+        7. Wait for product to exit
+        8. Close bottom gate
         
         Returns:
             True if successful, False if error
@@ -384,7 +417,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
             if not self.stm32.gate_open(self.gate_cutter_top):
                 raise HardwareError("Failed to open top gate")
             
-            await self._wait_async(self.gate_delay)
+            await self._wait_async(self.gate_delay) # TODO: adjust with sensor feedback
             
             # Close top gate
             self.logger.debug("Closing top gate...")
@@ -392,6 +425,11 @@ class StandardVegetableWorkflow(BaseWorkflow):
                 raise HardwareError("Failed to close top gate")
             
             await self._wait_async(self.gate_delay)
+            
+            # Gate is now CLOSED - safe to start prefetch for next item
+            # This runs in parallel while cutting happens
+            item_num = self.current_item + 1
+            await self._start_prefetch_next_item(item_num + 1)
             
             # Execute cut using configured axis bitmask
             self.logger.debug(
@@ -422,6 +460,83 @@ class StandardVegetableWorkflow(BaseWorkflow):
         except Exception as e:
             self.logger.error(f"Cutting sequence error: {e}", exc_info=True)
             return False
+    
+    async def _start_prefetch_next_item(self, next_item_num: int):
+        """
+        Start prefetching the next item in parallel (dispense + CV).
+        
+        This runs while the current item is being cut, so the next item
+        is ready as soon as cutting finishes.
+        
+        Args:
+            next_item_num: Item number to prefetch
+        """
+        # Don't prefetch if we're at or past target
+        if next_item_num > self.target_count:
+            self.logger.debug("Skipping prefetch - at target")
+            return
+        
+        # Don't prefetch if bay is empty
+        if self.stm32.is_hopper_empty(self.bay_id):
+            self.logger.debug("Skipping prefetch - bay empty")
+            return
+        
+        # Cancel any existing prefetch task
+        if self._prefetch_task and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
+            try:
+                await self._prefetch_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Start new prefetch task
+        self.logger.debug(f"Starting prefetch for item {next_item_num}")
+        self._prefetch_task = asyncio.create_task(
+            self._prefetch_next_item(next_item_num)
+        )
+    
+    async def _prefetch_next_item(self, item_num: int):
+        """
+        Prefetch task: dispense next item and run CV analysis.
+        
+        This runs in parallel with cutting, so the next item is ready
+        immediately when cutting finishes.
+        
+        Args:
+            item_num: Item number being prefetched
+        """
+        try:
+            self.logger.info(f"[PREFETCH] Starting prefetch for item {item_num}")
+            
+            # Dispense from bay
+            if not await self._dispense_from_bay():
+                self.logger.warning(f"[PREFETCH] Failed to dispense item {item_num}")
+                return
+            
+            # Wait for settling
+            await self._wait_async(self.staging_delay)
+            
+            # Run CV analysis
+            cv_result = await self._run_cv_check()
+            
+            # Store result for next iteration
+            self._prefetch_result = cv_result
+            self._prefetch_item_number = item_num
+            
+            self.logger.info(
+                f"[PREFETCH] Item {item_num} ready - "
+                f"{'ACCEPTED' if cv_result['accepted'] else 'REJECTED'} "
+                f"(confidence: {cv_result['confidence']:.2f})"
+            )
+            
+        except asyncio.CancelledError:
+            self.logger.debug(f"[PREFETCH] Prefetch cancelled for item {item_num}")
+            raise
+        except Exception as e:
+            self.logger.error(f"[PREFETCH] Error prefetching item {item_num}: {e}")
+            # Clear prefetch state on error
+            self._prefetch_result = None
+            self._prefetch_item_number = None
     
     def get_progress_percent(self) -> float:
         """Get workflow progress as percentage."""

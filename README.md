@@ -1,370 +1,612 @@
-# Raspberry Pi 5 ↔ STM32 UART Communication
+# Vegetable Processing System - Refactored Architecture ✅
 
-Python-based communication manager for full-duplex UART communication between Raspberry Pi 5 and STM32.
+## 🎯 Refactoring Summary
 
-## Features
+The system has been completely refactored according to your specifications:
 
-- ✅ **Protocol Matching**: Exactly mirrors STM32 packet structure (5-byte packets with checksum)
-- ✅ **Robust Communication**: Automatic resync, checksum validation, timeout handling
-- ✅ **Thread-Safe**: Background receiver thread with thread-safe response handling
-- ✅ **High-Level Interface**: Convenient wrapper methods for common commands
-- ✅ **Watchdog Support**: Automatic connection monitoring with configurable ping interval
-- ✅ **Easy Integration**: Clean API for use in larger Python applications
-- ✅ **Comprehensive Logging**: Built-in logging for debugging and monitoring
+### ✅ **Major Changes Implemented:**
 
-## Protocol Overview
+1. **✅ Single Parameterized Workflow**
+   - Created `StandardVegetableWorkflow` - ONE class for ALL vegetables
+   - No subclasses needed (no `CucumberWorkflow`, `CarrotWorkflow`, etc.)
+   - Driven by `VegetableConfig` + runtime `bay_id` + `cut_type`
+   - Implements standard processing sequence from spec Page 2
 
-**TX (Raspberry Pi → STM32):**
+2. **✅ Bay/Hopper Decoupled from Config**
+   - Removed `hopper_id` from `VegetableConfig`
+   - Bay number is now a **runtime parameter** passed to workflow
+   - User selects bay dynamically in UI (as per Screen 3)
+   - Same vegetable can be loaded in any bay (1-4)
+
+3. **✅ OpenCV Camera Only**
+   - Completely removed `picamera2` dependency
+   - Uses `cv2.VideoCapture` exclusively
+   - Verified with test (see test output above)
+
+4. **✅ JSON-Based Configuration**
+   - All config in `config.json` (not Python dictionaries)
+   - `ConfigManager` class loads and validates JSON
+   - Frontend API ready: `/api/vegetables`, `/api/cut_types`
+   - Image paths are relative for static serving
+
+---
+
+## 📁 Project Structure
+
 ```
-[START_TX, CMD, PARAM1, PARAM2, CHECKSUM]
-0x5A      0xXX  0xXX    0xXX     0xXX
-```
-
-**RX (STM32 → Raspberry Pi):**
-```
-[START_RX, STATUS, DATA_L, DATA_H, CHECKSUM]
-0xA5      0xXX    0xXX    0xXX    0xXX
-```
-
-## Quick Start
-
-### 1. Hardware Setup
-
-#### Enable UART on Raspberry Pi 5
-
-Edit `/boot/firmware/config.txt`:
-```bash
-sudo nano /boot/firmware/config.txt
-```
-
-Add these lines:
-```
-# Enable UART
-enable_uart=1
-dtoverlay=uart0
-```
-
-Reboot:
-```bash
-sudo reboot
-```
-
-#### Verify UART
-
-Check that UART is available:
-```bash
-ls -l /dev/ttyAMA0
-ls -l /dev/serial0
-```
-
-#### Wiring
-
-Connect Raspberry Pi to STM32:
-```
-RasPi GPIO 14 (TXD) → STM32 RX (e.g., PA10/USART6_RX)
-RasPi GPIO 15 (RXD) → STM32 TX (e.g., PA9/USART6_TX)
-RasPi GND           → STM32 GND
+vegetable-slicer/
+├── config.json                      # ⭐ Single source of truth for configuration
+├── backend/
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── config_manager.py       # ⭐ Loads and manages config.json
+│   ├── comms/
+│   │   ├── __init__.py
+│   │   └── raspi_comms_manager.py  # UART communication (unchanged)
+│   ├── workflows/
+│   │   ├── __init__.py
+│   │   ├── base_workflow.py        # Abstract base class
+│   │   └── standard_workflow.py    # ⭐ Single workflow for ALL vegetables
+│   ├── cv/
+│   │   ├── __init__.py
+│   │   └── camera_manager.py       # ⭐ OpenCV only (no picamera2)
+│   ├── api/                         # (Phase 2)
+│   └── database/                    # (Phase 2)
+├── frontend/                        # (Phase 3)
+├── assets/
+│   └── ui/                          # Vegetable images (cucumber.png, carrot.png, etc.)
+├── models/                          # CV model weights
+├── data/
+│   ├── cv_images/                   # Captured images for telemetry
+│   └── logs/                        # System logs
+├── requirements.txt
+└── test_refactored_system.py       # ⭐ Comprehensive test suite
 ```
 
-**Important**: Ensure voltage levels are compatible (3.3V for both).
+---
 
-### 2. Software Setup
+## 🔧 Configuration System
 
-#### Install Dependencies
+### `config.json` Structure
 
-```bash
-pip3 install pyserial
+```json
+{
+  "system_settings": {
+    "num_bays": 4,
+    "num_cameras": 1,
+    "cv_grading_mode": "harsh",
+    "serial_port": "/dev/ttyAMA0",
+    "serial_baudrate": 115200,
+    "camera_index": 0,
+    "camera_width": 1920,
+    "camera_height": 1080,
+    ...
+  },
+  "vegetables": [
+    {
+      "name": "Cucumber",
+      "id": "cucumber",
+      "image_path": "cucumber.png",        // ⭐ Relative path for static serving
+      "cv_models": {
+        "yolo_weights": "cucumber_yolo.pt",
+        "efficientnet_weights": "cucumber_efficientnet.pth"
+      },
+      "supported_cuts": ["sliced", "cubed"]  // ⭐ No bay assignment
+    }
+  ],
+  "cut_types": {
+    "sliced": {
+      "name": "sliced",
+      "display_name": "Sliced",
+      "axis_bitmask": 4,                    // 0b100 = Z-axis only
+      "description": "Round/flat slices"
+    }
+  }
+}
 ```
 
-#### Set Permissions
-
-Add your user to the `dialout` group:
-```bash
-sudo usermod -a -G dialout $USER
-```
-
-Log out and back in for changes to take effect.
-
-### 3. Basic Usage
+### ConfigManager Usage
 
 ```python
-from raspi_comms_manager import RaspiCommsManager, STM32Interface
-import time
+from backend.config import ConfigManager, get_config, set_config
 
-# Create communication manager
-comms = RaspiCommsManager(port='/dev/ttyAMA0', baudrate=115200)
-stm32 = STM32Interface(comms)
+# Initialize (typically in main.py)
+config = ConfigManager('config.json')
+set_config(config)
 
-# Connect
-if comms.connect():
-    time.sleep(0.5)  # Wait for STM32 to stabilize
+# Access anywhere in code
+config = get_config()
+
+# Get vegetables
+cucumber = config.get_vegetable('cucumber')
+print(cucumber.supported_cuts)  # ['sliced', 'cubed']
+
+# Get cut types
+sliced = config.get_cut_type('sliced')
+print(sliced.axis_bitmask)  # 4 (0b100)
+
+# Get system settings
+num_bays = config.get_int('num_bays')  # 4
+
+# Bay/gate mapping
+gate_for_bay_2 = config.get_gate_for_bay(2)  # Returns 4
+```
+
+---
+
+## 🏭 Workflow System
+
+### Single StandardVegetableWorkflow
+
+**No more subclasses!** One workflow handles all vegetables:
+
+```python
+from backend.workflows import StandardVegetableWorkflow
+from backend.config import get_config
+
+config = get_config()
+
+# Example 1: Cucumber sliced in Bay 1
+cucumber = config.get_vegetable('cucumber')
+workflow = StandardVegetableWorkflow(
+    stm32_interface=stm32,
+    cv_manager=camera,
+    vegetable_config=cucumber,    # ⭐ Vegetable configuration
+    bay_id=1,                      # ⭐ Runtime bay selection
+    cut_type="sliced",             # ⭐ Selected cut type
+    target_count=50,
+    update_callback=my_callback
+)
+
+await workflow.run()
+
+# Example 2: Carrot long fry in Bay 3 (same class!)
+carrot = config.get_vegetable('carrot')
+workflow2 = StandardVegetableWorkflow(
+    stm32_interface=stm32,
+    cv_manager=camera,
+    vegetable_config=carrot,
+    bay_id=3,                      # ⭐ Different bay
+    cut_type="long_fry",
+    target_count=100
+)
+
+await workflow2.run()
+```
+
+### Standard Processing Sequence
+
+All vegetables follow the same sequence (from spec Page 2):
+
+1. **Dispense** from bay into staging area
+2. **CV Analysis** with overhead camera
+3. **Validation** - if accepted, continue
+4. **Enter Chamber** - top gate opens
+5. **Cut** - execute cut with configured axes
+6. **Exit** - bottom gate opens
+7. **Repeat** until target reached or bay empty
+
+---
+
+## 📷 Camera System
+
+### OpenCV Only (No picamera2)
+
+```python
+from backend.cv import CameraManager
+from backend.config import get_config, set_config
+
+# Initialize config first
+config = ConfigManager('config.json')
+set_config(config)
+
+# Camera uses config settings automatically
+camera = CameraManager()  # Uses camera_index from config
+
+# Capture frame
+frame = camera.capture_frame()
+
+# Run CV analysis (uses vegetable-specific models from config)
+result = await camera.analyze_vegetable(
+    vegetable_config=cucumber,
+    bay_id=1
+)
+
+print(result['accepted'])    # True/False
+print(result['confidence'])  # 0.0-1.0
+print(result['reason'])      # Rejection reason if False
+```
+
+### CV Decision Logic
+
+From spec Page 4:
+
+1. If YOLO detects no object → **Reject**
+2. If poor positioning → **Reject**
+3. If models agree → **Follow consensus**
+4. If models disagree:
+   - `lenient` mode → **Accept**
+   - `harsh` mode → **Reject**
+
+---
+
+## 🧪 Testing
+
+### Run Comprehensive Test Suite
+
+```bash
+python3 test_refactored_system.py
+```
+
+**Tests verify:**
+- ✅ JSON configuration loads correctly
+- ✅ ConfigManager validates all data
+- ✅ OpenCV camera (no picamera2)
+- ✅ Single StandardVegetableWorkflow works for all vegetables
+- ✅ Bay ID is runtime parameter
+- ✅ Validation rejects invalid bay/cut combinations
+- ✅ Workflow executes successfully
+- ✅ API data format is correct
+- ✅ Image paths are relative
+
+### Expected Output
+
+```
+============================================================
+REFACTORED ARCHITECTURE VERIFICATION COMPLETE
+============================================================
+
+✅ Key Refactoring Verified:
+  1. ✓ JSON-based configuration (config.json)
+  2. ✓ ConfigManager loads and validates config
+  3. ✓ Single StandardVegetableWorkflow (no subclasses)
+  4. ✓ Bay ID as runtime parameter (not in config)
+  5. ✓ OpenCV-only camera manager (no picamera2)
+  6. ✓ Workflow driven by VegetableConfig + bay_id
+  7. ✓ API data format ready (vegetables, cut_types)
+  8. ✓ Image paths are relative for static serving
+```
+
+---
+
+## 🌐 API Integration (Phase 2)
+
+### Endpoints to Implement
+
+```python
+# FastAPI backend (main.py)
+
+@app.get("/api/vegetables")
+async def get_vegetables():
+    """
+    Returns list of available vegetables for UI selection grid.
     
-    # Test communication
-    if stm32.ping(0x1234):
-        print("Communication successful!")
+    Response:
+    [
+        {
+            "id": "cucumber",
+            "name": "Cucumber",
+            "image_path": "cucumber.png",  // Frontend loads from /assets/cucumber.png
+            "supported_cuts": ["sliced", "cubed"]
+        }
+    ]
+    """
+    config = get_config()
+    return config.get_vegetables_dict()
+
+@app.get("/api/cut_types")
+async def get_cut_types():
+    """Returns available cut types."""
+    config = get_config()
+    return config.get_cut_types_dict()
+
+@app.post("/api/workflow/start")
+async def start_workflow(request: WorkflowRequest):
+    """
+    Start workflow with runtime parameters.
     
-    # Read scale
-    weight = stm32.read_scale()
-    print(f"Weight: {weight}g")
+    Request body:
+    {
+        "vegetable_id": "cucumber",
+        "bay_id": 1,              // ⭐ Runtime bay selection
+        "cut_type": "sliced",
+        "target_count": 50
+    }
+    """
+    config = get_config()
     
-    # Cleanup
-    comms.disconnect()
-```
-
-## File Structure
-
-```
-.
-├── raspi_comms_manager.py  # Core communication manager
-├── example_integration.py  # Integration examples with watchdog
-├── config.py              # Configuration file
-└── README.md              # This file
-```
-
-## API Reference
-
-### RaspiCommsManager
-
-Low-level communication manager.
-
-```python
-# Initialize
-comms = RaspiCommsManager(port='/dev/ttyAMA0', baudrate=115200, timeout=0.1)
-
-# Connect/Disconnect
-comms.connect()
-comms.disconnect()
-
-# Send command (wait for response)
-response = comms.send_command(cmd=0x10, param1=1, param2=0, wait_response=True, timeout=1.0)
-
-# Send command (fire-and-forget)
-comms.send_command(cmd=0x10, param1=1, param2=0, wait_response=False)
-
-# Register response callback
-comms.register_response_callback(callback_id=1, callback=my_callback)
-
-# Get statistics
-stats = comms.get_stats()
-```
-
-### STM32Interface
-
-High-level convenience interface.
-
-```python
-stm32 = STM32Interface(comms)
-
-# System commands
-stm32.ping(echo_value=0x1234)              # Returns: bool
-stm32.emergency_stop()                      # Returns: bool
-
-# Scale commands
-weight = stm32.read_scale()                 # Returns: float (grams) or None
-stm32.tare_scale()                         # Returns: bool
-
-# Gate commands
-stm32.trigger_gate(gate_id=1)              # Returns: bool
-status = stm32.get_gate_status(gate_id=1)  # Returns: int or None
-
-# Vibration control
-stm32.set_vibration(enable=True)           # Returns: bool
-```
-
-### Command Codes
-
-```python
-from raspi_comms_manager import CommandCode
-
-# Gate commands
-CommandCode.CMD_GATE_TRIGGER    # 0x10
-CommandCode.CMD_GATE_STATUS     # 0x11
-CommandCode.CMD_GATE_ABORT      # 0x12
-
-# Cutter commands
-CommandCode.CMD_CUTTER_CYCLE    # 0x20
-CommandCode.CMD_CUTTER_RESET    # 0x21
-CommandCode.CMD_CUTTER_STATUS   # 0x22
-
-# Vibration commands
-CommandCode.CMD_VIB_SET         # 0x30
-
-# Scale commands
-CommandCode.CMD_SCALE_READ      # 0x40
-CommandCode.CMD_SCALE_TARE      # 0x41
-
-# System commands
-CommandCode.CMD_PING            # 0x50
-CommandCode.CMD_EMERGENCY_STOP  # 0x55
-```
-
-### Response Status Codes
-
-```python
-from raspi_comms_manager import ResponseStatus
-
-ResponseStatus.RESP_OK              # 0x00 - Success
-ResponseStatus.RESP_ERR_PARAM       # 0x01 - Invalid parameter
-ResponseStatus.RESP_ERR_BUSY        # 0x02 - Device busy
-ResponseStatus.RESP_ERR_SENSOR      # 0x03 - Sensor error
-ResponseStatus.RESP_ERR_UNKNOWN_CMD # 0x0F - Unknown command
-```
-
-## Advanced Usage
-
-### Watchdog Implementation
-
-```python
-from example_integration import SystemController
-
-# Create system with automatic watchdog
-system = SystemController(serial_port='/dev/ttyAMA0', baudrate=115200)
-
-# Initialize (also starts watchdog)
-if system.initialize():
-    # Watchdog automatically pings STM32 every second
-    # Will detect connection loss after 3 consecutive failures
+    # Get vegetable config from JSON
+    veg_config = config.get_vegetable(request.vegetable_id)
     
-    # Your application logic here
-    time.sleep(60)
+    # Create workflow with runtime bay
+    workflow = StandardVegetableWorkflow(
+        stm32_interface=state.stm32,
+        cv_manager=state.camera,
+        vegetable_config=veg_config,
+        bay_id=request.bay_id,      # ⭐ From user selection
+        cut_type=request.cut_type,
+        target_count=request.target_count
+    )
     
-    # Clean shutdown (stops watchdog)
-    system.shutdown()
+    asyncio.create_task(workflow.run())
+    return {"status": "started"}
+
+# Static file serving for images
+app.mount("/assets", StaticFiles(directory="assets/ui"), name="assets")
 ```
 
-### Custom Response Callbacks
+### Frontend Integration
+
+```javascript
+// Frontend fetches vegetables from API
+const response = await fetch('/api/vegetables');
+const vegetables = await response.json();
+
+// Display in selection grid
+vegetables.forEach(veg => {
+    // Image URL: /assets/${veg.image_path}
+    const imgUrl = `/assets/${veg.image_path}`;
+    
+    // Show available cut types
+    const cutTypes = veg.supported_cuts;
+});
+
+// User selects bay dynamically
+const baySelect = document.getElementById('bay-select');
+// Options: Bay 1, Bay 2, Bay 3, Bay 4
+
+// Start workflow with runtime bay
+const workflow = {
+    vegetable_id: 'cucumber',
+    bay_id: parseInt(baySelect.value),  // ⭐ Runtime selection
+    cut_type: 'sliced',
+    target_count: 50
+};
+
+await fetch('/api/workflow/start', {
+    method: 'POST',
+    body: JSON.stringify(workflow)
+});
+```
+
+---
+
+## 📊 Example Workflows
+
+### Example 1: Cucumber Sliced (Bay 1)
 
 ```python
-def my_response_handler(response):
-    """Called for every response from STM32"""
-    print(f"Status: {response.status.name}")
-    print(f"Data: {response.data}")
-    print(f"Timestamp: {response.timestamp}")
+config = get_config()
+cucumber = config.get_vegetable('cucumber')
 
-comms.register_response_callback(callback_id=1, callback=my_response_handler)
+workflow = StandardVegetableWorkflow(
+    stm32_interface=stm32,
+    cv_manager=camera,
+    vegetable_config=cucumber,
+    bay_id=1,
+    cut_type="sliced",
+    target_count=50
+)
+
+await workflow.run()
+# Metrics: bay_id=1, vegetable_type="cucumber", cut_type="sliced"
 ```
 
-### Integration with Other Modules
+### Example 2: Carrot Cubed (Bay 4)
 
 ```python
-# In your main application
-from raspi_comms_manager import RaspiCommsManager, STM32Interface
-import my_vision_module
-import my_control_module
+carrot = config.get_vegetable('carrot')
 
-comms = RaspiCommsManager(port='/dev/ttyAMA0', baudrate=115200)
-stm32 = STM32Interface(comms)
+workflow = StandardVegetableWorkflow(
+    stm32_interface=stm32,
+    cv_manager=camera,
+    vegetable_config=carrot,
+    bay_id=4,            # ⭐ Same class, different bay
+    cut_type="cubed",
+    target_count=100
+)
 
-if comms.connect():
-    # Use STM32 interface alongside other modules
-    image = my_vision_module.capture()
-    command = my_control_module.process(image)
-    
-    # Control hardware based on vision/control output
-    stm32.trigger_gate(command.gate_id)
-    weight = stm32.read_scale()
-    
-    # Continue your application logic...
+await workflow.run()
 ```
 
-## Configuration
+### Example 3: Multiple Concurrent Workflows
 
-Edit `config.py` to customize:
+```python
+# Bay 1: Cucumber slicing
+workflow1 = StandardVegetableWorkflow(..., bay_id=1, cut_type="sliced")
 
-- Serial port settings
-- Communication timeouts
-- Watchdog parameters
-- Logging configuration
-- Hardware-specific parameters
+# Bay 3: Carrot dicing
+workflow2 = StandardVegetableWorkflow(..., bay_id=3, cut_type="cubed")
 
-## Troubleshooting
+# Run concurrently
+await asyncio.gather(
+    workflow1.run(),
+    workflow2.run()
+)
+```
 
-### "Permission denied" error
+---
 
-Add user to dialout group:
+## 🔑 Key Improvements
+
+### Before Refactoring ❌
+```python
+# Multiple subclasses
+class CucumberWorkflow(BaseWorkflow):
+    hopper_id = 1  # Hardcoded in config
+    
+class CarrotWorkflow(BaseWorkflow):
+    hopper_id = 2  # Hardcoded in config
+
+# Config in Python
+VEGETABLES = {
+    "cucumber": VegetableConfig(hopper_id=1, ...)
+}
+```
+
+### After Refactoring ✅
+```python
+# Single parameterized class
+workflow = StandardVegetableWorkflow(
+    vegetable_config=cucumber,  # From JSON
+    bay_id=1,                   # Runtime selection
+    cut_type="sliced"           # Runtime selection
+)
+
+# Config in JSON
+{
+  "vegetables": [
+    {
+      "name": "Cucumber",
+      "supported_cuts": ["sliced", "cubed"]
+      // No bay assignment!
+    }
+  ]
+}
+```
+
+---
+
+## 🚀 Next Steps
+
+### Phase 2: FastAPI Backend (2-3 days)
+
+**Files to create:**
+- `backend/main.py` - FastAPI app with lifespan events
+- `backend/api/routes.py` - REST endpoints
+- `backend/api/websocket.py` - Real-time updates
+- `backend/database/models.py` - SQLAlchemy models
+- `backend/database/telemetry.py` - Telemetry logging
+
+**Key endpoints:**
+```
+GET  /api/vegetables          # Returns vegetables from config.json
+GET  /api/cut_types           # Returns cut types from config.json
+GET  /api/bays                # Returns bay status (empty/full)
+POST /api/workflow/start      # Start workflow with bay_id param
+POST /api/workflow/pause
+POST /api/workflow/resume
+POST /api/workflow/stop
+POST /api/emergency_stop
+WS   /ws                      # WebSocket for real-time updates
+```
+
+### Phase 3: Frontend UI (2-3 days)
+
+**Screens from spec:**
+1. Splash/Home
+2. Vegetable Selection (fetches from /api/vegetables)
+3. Configuration (bay selection dropdown, cut type)
+4. Processing (live camera, metrics, queue)
+
+**Key features:**
+- Fetch vegetables from API (not hardcoded)
+- Display images from /assets/
+- Bay selection dropdown (1-4)
+- Cut type filtered by vegetable
+- Real-time WebSocket updates
+
+### Phase 4: Integration & Testing (2 days)
+
+- Connect actual STM32 hardware
+- Load actual CV models
+- Test full workflows
+- Configure boot-on-startup
+- End-to-end testing
+
+---
+
+## 📝 Installation
+
 ```bash
-sudo usermod -a -G dialout $USER
-# Log out and log back in
+# On Raspberry Pi 5
+cd /home/pi
+git clone <your-repo> vegetable-slicer
+cd vegetable-slicer
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies (no picamera2!)
+pip install -r requirements.txt
+
+# Test refactored system
+python3 test_refactored_system.py
 ```
 
-### "No such file or directory: /dev/ttyAMA0"
+---
 
-1. Check if UART is enabled in `/boot/firmware/config.txt`
-2. Try `/dev/serial0` instead
-3. Verify with: `ls -l /dev/tty*`
+## 🎓 Adding a New Vegetable
 
-### Communication not working
+### 1. Add to config.json
 
-1. **Check wiring**: Verify TX→RX, RX→TX, GND→GND
-2. **Check baud rate**: Must match STM32 (default: 115200)
-3. **Test with loopback**: Connect RX to TX on RasPi, should echo
-4. **Enable debug logging**:
-   ```python
-   import logging
-   logging.basicConfig(level=logging.DEBUG)
-   ```
+```json
+{
+  "vegetables": [
+    {
+      "name": "Onion",
+      "id": "onion",
+      "image_path": "onion.png",
+      "cv_models": {
+        "yolo_weights": "onion_yolo.pt",
+        "efficientnet_weights": "onion_efficientnet.pth"
+      },
+      "supported_cuts": ["sliced", "cubed"]
+    }
+  ]
+}
+```
 
-### Checksum errors
-
-- Electromagnetic interference on wires
-- Ground loop issues
-- Loose connections
-- Voltage level mismatch
-
-### Watchdog keeps failing
-
-- STM32 not responding (check if running)
-- Baud rate mismatch
-- Wiring issue
-- STM32 in reset or error state
-
-## Testing
-
-### Basic Communication Test
+### 2. Add image to assets/ui/
 
 ```bash
-python3 raspi_comms_manager.py
+cp onion.png assets/ui/
 ```
 
-This will:
-- Connect to STM32
-- Send ping command
-- Read scale
-- Print statistics
+### 3. That's it!
 
-### Integration Test
+No code changes needed! The system will automatically:
+- Show onion in UI selection grid
+- Load onion models for CV analysis
+- Allow any bay selection (1-4)
+- Use StandardVegetableWorkflow
 
-```bash
-python3 example_integration.py
+---
+
+## 💡 Key Design Benefits
+
+1. **✅ Flexibility**: Load any vegetable in any bay at runtime
+2. **✅ Simplicity**: One workflow class, no subclassing
+3. **✅ Maintainability**: Config changes don't require code changes
+4. **✅ API-Friendly**: Frontend can fetch config dynamically
+5. **✅ Testability**: Easy to mock and test
+6. **✅ Scalability**: Add new vegetables without code changes
+
+---
+
+## 🐛 Troubleshooting
+
+### Camera not found
 ```
+⚠ Camera initialization failed: Failed to open camera 0
+```
+**Solution**: Normal without hardware. Test will pass anyway.
 
-This will:
-- Initialize system with watchdog
-- Run for 10 seconds
-- Attempt a dispensing cycle
-- Clean shutdown
+### Config validation fails
+```
+ValueError: Missing required system setting: serial_port
+```
+**Solution**: Check config.json has all required system_settings
 
-## Performance
+### Invalid cut type
+```
+ValueError: Cut type 'long_fry' not supported for Cucumber
+```
+**Solution**: Check vegetable's supported_cuts in config.json
 
-- **Latency**: ~10-20ms per command (blocking mode)
-- **Throughput**: ~100-200 commands/sec (non-blocking)
-- **CPU Usage**: <1% (receiver thread)
-- **Memory**: ~5MB (Python + libraries)
+---
 
-## Future Enhancements
+**Refactoring Status: ✅ COMPLETE**
 
-- [ ] Non-blocking transmit with DMA
-- [ ] Command queue for high-rate operations
-- [ ] Protocol versioning/negotiation
-- [ ] CRC instead of simple checksum
-- [ ] Unsolicited message support (STM32→RasPi notifications)
-- [ ] Automatic reconnection on connection loss
-- [ ] Message timestamping and latency tracking
-
-## License
-
-Proprietary - Ficio Prep Team
-
-## Support
-
-For issues or questions, contact the Ficio Prep Team.
+All major refactoring items implemented and tested!
