@@ -1,0 +1,122 @@
+import { useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Button } from '../components/common';
+import { CameraFeed, WeightDisplay, TaskQueue, EmergencyStop } from '../components/processing';
+import { useApp } from '../store/AppContext';
+
+export function ProcessingScreen() {
+  const navigate = useNavigate();
+  const { state, getVegetableName, getCutTypeName, refreshData } = useApp();
+
+  // Find the active (running) task
+  const activeTask = useMemo(() => {
+    return state.tasks.find((t) => t.status === 'running');
+  }, [state.tasks]);
+
+  // Get all non-completed tasks for the queue
+  const queuedTasks = useMemo(() => {
+    return state.tasks.filter((t) =>
+      t.status === 'running' || t.status === 'queued' || t.status === 'paused'
+    );
+  }, [state.tasks]);
+
+  // Build lookup maps for names
+  const vegetableNames = useMemo(() => {
+    return state.vegetables.reduce((acc, v) => {
+      acc[v.id] = v.name;
+      return acc;
+    }, {} as Record<string, string>);
+  }, [state.vegetables]);
+
+  const cutTypeNames = useMemo(() => {
+    return state.cutTypes.reduce((acc, c) => {
+      acc[c.id] = c.display_name;
+      return acc;
+    }, {} as Record<string, string>);
+  }, [state.cutTypes]);
+
+  const handleQueueNewTask = () => {
+    navigate('/select');
+  };
+
+  const handleEmergencyStop = () => {
+    refreshData();
+  };
+
+  // Display info
+  const displayBay = activeTask?.bay_id || 1;
+  const displayVegetable = activeTask
+    ? getVegetableName(activeTask.vegetable_id)
+    : 'No active task';
+  const displayCut = activeTask ? getCutTypeName(activeTask.cut_type) : '';
+  const displayWeight = (activeTask?.stats?.weight_processed_grams || 0) / 1000; // Convert to kg
+
+  return (
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Header bar */}
+      <header className="bg-surface px-4 py-3 flex items-center justify-between shadow-sm">
+        <div className="font-medium text-text-primary">
+          {activeTask ? (
+            <>Bay {displayBay} | {displayVegetable} ({displayCut})</>
+          ) : (
+            'Processing'
+          )}
+        </div>
+        {activeTask && (
+          <div className="flex items-center gap-1.5 text-danger">
+            <span className="w-2 h-2 bg-danger rounded-full animate-pulse" />
+            <span className="text-sm font-semibold">LIVE</span>
+          </div>
+        )}
+      </header>
+
+      {/* Main content */}
+      <div className="flex-1 p-4 space-y-4 pb-24">
+        {/* Camera feed */}
+        <CameraFeed
+          bayId={displayBay}
+          vegetableName={displayVegetable}
+          cutType={displayCut}
+        />
+
+        {/* Stats and stop button row */}
+        <div className="flex gap-4">
+          <WeightDisplay weight={displayWeight} />
+          <EmergencyStop onStop={handleEmergencyStop} />
+        </div>
+
+        {/* Task queue */}
+        {queuedTasks.length > 0 && (
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-text-secondary uppercase tracking-wide px-1">
+              Task Queue
+            </h3>
+            <TaskQueue
+              tasks={queuedTasks}
+              vegetables={vegetableNames}
+              cutTypes={cutTypeNames}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Queue new task button */}
+      <div className="fixed bottom-0 left-0 right-0 p-4 bg-background border-t border-gray-200">
+        <Button
+          onClick={handleQueueNewTask}
+          variant="ghost"
+          fullWidth
+          size="lg"
+          className="border-2 border-dashed border-gray-300"
+          icon={
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          }
+        >
+          Queue New Task
+        </Button>
+      </div>
+    </div>
+  );
+}

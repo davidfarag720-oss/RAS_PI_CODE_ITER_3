@@ -11,7 +11,7 @@ Date: February 2026
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 import logging
 import asyncio
@@ -44,6 +44,7 @@ config: Optional[ConfigManager] = None
 
 # WebSocket connections for live updates
 active_websockets: Set[WebSocket] = set()
+shutdown_event: Optional[asyncio.Event] = None
 
 
 @asynccontextmanager
@@ -52,40 +53,60 @@ async def lifespan(app: FastAPI):
     Application lifespan manager.
     Initializes and cleans up resources on startup/shutdown.
     """
-    global task_manager, camera_manager, config
-    
+    global task_manager, camera_manager, config, shutdown_event
+
     logger = logging.getLogger('FastAPI')
     logger.info("Starting Vegetable Processing System API...")
-    
+
+    # Create shutdown event
+    shutdown_event = asyncio.Event()
+
     try:
         # Initialize configuration
         config = ConfigManager('config.json')
         config.validate()
         set_config(config)
         logger.info("Configuration loaded and validated")
-        
+
         # Initialize camera
         camera_manager = CameraManager()
         logger.info("Camera initialized")
-        
+
         # Initialize task manager
         task_manager = TaskManager(config, camera_manager)
         logger.info("Task manager initialized")
-        
+
         logger.info("✓ System startup complete")
-        
+
         yield
-        
+
     finally:
         # Cleanup on shutdown
         logger.info("Shutting down system...")
-        
+
+        # Signal all WebSocket endpoints to close
+        if shutdown_event:
+            shutdown_event.set()
+
+        # Close all active WebSocket connections
+        disconnected = set()
+        for ws in active_websockets:
+            try:
+                await ws.close(code=1001)
+            except:
+                pass
+            disconnected.add(ws)
+        active_websockets.difference_update(disconnected)
+
+        # Give WebSocket handlers time to clean up
+        await asyncio.sleep(0.5)
+
         if task_manager:
             await task_manager.shutdown()
-        
+
         if camera_manager:
             camera_manager.close()
-        
+
         logger.info("✓ Shutdown complete")
 
 
@@ -118,8 +139,15 @@ app.add_middleware(
 install_path = Path("/home/pi/vegetable-slicer")
 assets_path = install_path / "assets"
 
+# Also check for local development paths
+local_assets_path = Path(__file__).parent.parent.parent / "assets"
 if assets_path.exists():
     app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
+elif local_assets_path.exists():
+    app.mount("/assets", StaticFiles(directory=str(local_assets_path)), name="assets")
+
+# Serve React frontend build
+frontend_dist_path = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
 
 # ============================================================================
@@ -422,30 +450,30 @@ async def websocket_camera_feed(websocket: WebSocket):
     """
     await websocket.accept()
     active_websockets.add(websocket)
-    
+
     try:
-        while True:
+        while not shutdown_event.is_set():
             if not camera_manager or not camera_manager.is_ready():
                 await asyncio.sleep(0.1)
                 continue
-            
+
             try:
                 # Capture frame
                 frame = camera_manager.capture_frame()
-                
+
                 # Encode as JPEG
                 _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                
+
                 # Send to client
                 await websocket.send_bytes(buffer.tobytes())
-                
+
                 # Limit frame rate to ~30 FPS
                 await asyncio.sleep(1/30)
-                
+
             except Exception as e:
                 logging.error(f"Error streaming frame: {e}")
                 break
-                
+
     except WebSocketDisconnect:
         pass
     finally:
@@ -460,7 +488,7 @@ async def websocket_system_updates(websocket: WebSocket):
     """
     await websocket.accept()
     active_websockets.add(websocket)
-    
+
     try:
         # Send initial status
         status = await get_system_status()
@@ -468,11 +496,11 @@ async def websocket_system_updates(websocket: WebSocket):
             'type': 'status',
             'data': status.model_dump()
         })
-        
-        # Keep connection alive
-        while True:
+
+        # Keep connection alive until shutdown
+        while not shutdown_event.is_set():
             await asyncio.sleep(1)
-            
+
     except WebSocketDisconnect:
         pass
     finally:
@@ -559,6 +587,42 @@ async def general_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal server error"}
     )
+
+
+# ============================================================================
+# SPA FRONTEND SERVING
+# ============================================================================
+
+# Mount frontend static assets if the build exists
+if frontend_dist_path.exists():
+    frontend_assets = frontend_dist_path / "assets"
+    if frontend_assets.exists():
+        app.mount("/static", StaticFiles(directory=str(frontend_assets)), name="frontend-static")
+
+
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    """
+    Serve React SPA for all non-API routes.
+    This catch-all route must be defined LAST.
+    """
+    # Don't interfere with API, WebSocket, assets, or health routes
+    if (
+        full_path.startswith("api/") or
+        full_path.startswith("ws/") or
+        full_path.startswith("assets/") or
+        full_path.startswith("static/") or
+        full_path == "health"
+    ):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Serve index.html for SPA routing
+    index_path = frontend_dist_path / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+
+    # Fallback: if no frontend build, return 404
+    raise HTTPException(status_code=404, detail="Frontend not built. Run 'npm run build' in frontend/")
 
 
 # ============================================================================
