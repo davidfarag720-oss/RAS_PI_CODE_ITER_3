@@ -59,12 +59,64 @@ python3 -c "from backend.config import ConfigManager; c = ConfigManager(); c.val
 ### Pipelining/Prefetching
 Critical optimization: next item is dispensed and CV analyzed while current item cuts. Prefetch starts AFTER top gate closes (safety requirement).
 
+### Hardware Configuration
+
+**Gates (6 total):**
+- Gate 1 (Top Cutter): Controls entry into cutting chamber
+- Gate 2 (Bottom Cutter): Controls exit from cutting chamber
+- Gates 3-6: Map to Hoppers 1-4 respectively
+- Smart Dispensing: STM32 "Cycle" command opens gate slowly until laser sensor trips (detects falling vegetable), then closes immediately to prevent double-feeding
+
+**Cutters (3 axes):**
+- Cutter 1: Vertical slice (X-axis)
+- Cutter 2: Vertical slice (Y-axis)
+- Cutter 3: Horizontal slice (Z-axis)
+- Control: Raspberry Pi sends 3-bit bitmask; STM32 synchronizes physical movement
+
+**Vibration System:**
+- 4 motors corresponding to Hoppers 1-4
+- Triggered concurrently with hopper dispense to prevent jams
+
+**Scale:**
+- Real-time weight monitoring polled from STM32
+- Calibration/precision handled at firmware level
+
+### Cut Type to Actuator Mapping
+
+| Cut Type | Actuators | Axis Bitmask | Result |
+|----------|-----------|--------------|--------|
+| Long Fry | Cutters 1+2 | 0b011 (3) | Longitudinal sticks |
+| Short Fry | Cutters 1+3 | 0b101 (5) | Short sticks |
+| Sliced | Cutter 3 | 0b100 (4) | Round/flat slices |
+| Long Slice | Cutter 1 | 0b001 (1) | Lengthwise slices |
+| Cubed | Cutters 1+2+3 | 0b111 (7) | Cubes/dice |
+
+### Computer Vision Decision Logic
+
+**Model Ensemble:**
+- Model A (YOLO): Detects object, labels as "healthy" or "unhealthy"
+- Model B (EfficientNetV2): Binary classification (healthy vs unhealthy)
+
+**Decision Flow:**
+1. If YOLO detects multiple objects OR no label → follow EfficientNet
+2. If models agree → follow consensus
+3. If models disagree:
+   - `cv_grading_mode: "lenient"` → Accept
+   - `cv_grading_mode: "harsh"` → Reject
+
+Captured images saved to `data/cv_images/` for telemetry and model retraining.
+
 ### Hardware Communication (STM32)
-5-byte UART packets with checksum validation. Command codes in `backend/comms/raspi_comms_manager.py`:
-- Gates (0x10-0x1F): OPEN, CLOSE, CYCLE, HOPPER_DISPENSE
-- Cutter (0x20-0x2F): CUT_EXECUTE (axis bitmask), CUT_HOME, CUT_ABORT
-- Scale (0x40-0x4F): SCALE_READ, SCALE_TARE
-- System (0xF0-0xFF): EMERGENCY_STOP, RESET_SYSTEM
+
+**Protocol:** 5-byte UART packets with checksum validation. The protocol is fully extensible for arbitrary functions (calibration routines, diagnostics, parameter updates, etc.).
+
+**Baseline Command Set** (see `backend/comms/raspi_comms_manager.py`):
+- 0x10 (CMD_GATE_CTRL): gate_id, action_code (0=Close, 1=Open, 2=Cycle)
+- 0x20 (CMD_CUT_EXECUTE): 3-bit bitmask for axes
+- 0x30 (CMD_VIB_SET): hopper_id, state (0=Off, 1=On)
+- 0x40 (CMD_SCALE_READ): Returns weight as float
+- 0x50 (CMD_GET_STATUS): Returns hopper empty/full status bits
+- 0xF0+ (System): EMERGENCY_STOP, RESET_SYSTEM
 
 ## Key Files
 
@@ -78,6 +130,23 @@ Critical optimization: next item is dispensed and CV analyzed while current item
 | backend/api/task_manager.py | Bay reservation, task queue |
 | backend/comms/raspi_comms_manager.py | STM32 UART protocol |
 | backend/cv/camera_manager.py | OpenCV + YOLO + EfficientNet |
+
+## UI Screen Flow (Phase 3)
+
+Touch-optimized interface with White/Grey/Green palette:
+
+1. **Splash/Home:** "Ficio Prep" header, "Tap anywhere to begin" overlay
+2. **Vegetable Selection:** 2xN grid of square tiles (rounded corners), vegetable image + name
+3. **Configuration:**
+   - Dropdown for cut type (filtered by vegetable's supported_cuts)
+   - Bay selection (disables bays with active tasks)
+   - Large green "Begin" button (bottom right)
+4. **Processing (Active):**
+   - Live camera feed of staging area
+   - Large "Weight Processed: X kg" display
+   - "Queue New Task" button (returns to Screen 2)
+   - Queue list view
+   - Large red "STOP" button
 
 ## API Structure
 
@@ -116,3 +185,12 @@ await workflow.run()
 - Custom exceptions: WorkflowError, HardwareError, CVError, SafetyError
 - Enums for constants: CommandCode, ResponseStatus, WorkflowState, WorkflowEvent
 - pytest with pytest-asyncio for testing
+
+## Deployment Environment
+
+- **Hardware:** Raspberry Pi 5
+- **OS:** Linux (Debian-based)
+- **Display:** Capacitive touch screen
+- **Install Path:** `/home/pi/vegetable-slicer`
+- **Camera:** USB camera (expandable to multi-camera via config)
+- **Serial:** `/dev/ttyAMA0` @ 115200 baud (STM32 UART)
