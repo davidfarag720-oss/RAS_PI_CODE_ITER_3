@@ -39,6 +39,10 @@ export function ProcessingScreen() {
     navigate('/select');
   };
 
+  const handleViewQueue = () => {
+    document.getElementById('task-queue')?.scrollIntoView({ behavior: 'smooth' });
+  };
+
   const handleEmergencyStop = () => {
     refreshData();
   };
@@ -50,6 +54,7 @@ export function ProcessingScreen() {
     : 'No active task';
   const displayCut = activeTask ? getCutTypeName(activeTask.cut_type) : '';
   const displayWeight = (activeTask?.stats?.weight_processed_grams || 0) / 1000; // Convert to kg
+  const displayItemCount = activeTask?.stats?.items_processed || 0;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -81,13 +86,17 @@ export function ProcessingScreen() {
 
         {/* Stats and stop button row */}
         <div className="flex gap-4">
-          <WeightDisplay weight={displayWeight} />
+          <WeightDisplay
+            weight={displayWeight}
+            itemCount={displayItemCount}
+            vegetableName={displayVegetable}
+          />
           <EmergencyStop onStop={handleEmergencyStop} />
         </div>
 
         {/* Task queue */}
         {queuedTasks.length > 0 && (
-          <div className="space-y-2">
+          <div id="task-queue" className="space-y-2">
             <h3 className="text-sm font-medium text-text-secondary uppercase tracking-wide px-1">
               Task Queue
             </h3>
@@ -100,22 +109,38 @@ export function ProcessingScreen() {
         )}
       </div>
 
-      {/* Queue new task button */}
+      {/* Bottom action buttons */}
       <div className="fixed bottom-0 left-0 right-0 p-4 bg-background border-t border-gray-200">
-        <Button
-          onClick={handleQueueNewTask}
-          variant="ghost"
-          fullWidth
-          size="lg"
-          className="border-2 border-dashed border-gray-300"
-          icon={
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-          }
-        >
-          Queue New Task
-        </Button>
+        <div className="flex gap-3">
+          <Button
+            onClick={handleQueueNewTask}
+            variant="ghost"
+            fullWidth
+            size="lg"
+            className="border-2 border-dashed border-gray-300"
+            icon={
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+            }
+          >
+            Queue New Task
+          </Button>
+          <Button
+            onClick={handleViewQueue}
+            variant="ghost"
+            fullWidth
+            size="lg"
+            className="border-2 border-gray-300"
+            icon={
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+              </svg>
+            }
+          >
+            View Queue
+          </Button>
+        </div>
       </div>
     </div>
   );

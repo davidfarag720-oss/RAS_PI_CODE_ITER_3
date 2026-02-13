@@ -44,6 +44,7 @@ config: Optional[ConfigManager] = None
 
 # WebSocket connections for live updates
 active_websockets: Set[WebSocket] = set()
+websocket_tasks: Set[asyncio.Task] = set()  # Track WebSocket handler tasks
 shutdown_event: Optional[asyncio.Event] = None
 
 
@@ -84,11 +85,27 @@ async def lifespan(app: FastAPI):
         # Cleanup on shutdown
         logger.info("Shutting down system...")
 
-        # Signal all WebSocket endpoints to close
+        # 1. Signal all WebSocket endpoints to close
         if shutdown_event:
             shutdown_event.set()
 
-        # Close all active WebSocket connections
+        # 2. Cancel all WebSocket handler tasks
+        for task in websocket_tasks:
+            if not task.done():
+                task.cancel()
+
+        # 3. Wait briefly for handlers to exit
+        if websocket_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*websocket_tasks, return_exceptions=True),
+                    timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some WebSocket handlers did not exit cleanly")
+        websocket_tasks.clear()
+
+        # 4. Close all WebSocket connections
         disconnected = set()
         for ws in active_websockets:
             try:
@@ -98,12 +115,11 @@ async def lifespan(app: FastAPI):
             disconnected.add(ws)
         active_websockets.difference_update(disconnected)
 
-        # Give WebSocket handlers time to clean up
-        await asyncio.sleep(0.5)
-
+        # 5. Shutdown task manager (which cancels workflows)
         if task_manager:
             await task_manager.shutdown()
 
+        # 6. Close camera
         if camera_manager:
             camera_manager.close()
 
@@ -451,6 +467,11 @@ async def websocket_camera_feed(websocket: WebSocket):
     await websocket.accept()
     active_websockets.add(websocket)
 
+    # Track this handler task
+    current_task = asyncio.current_task()
+    if current_task:
+        websocket_tasks.add(current_task)
+
     try:
         while not shutdown_event.is_set():
             if not camera_manager or not camera_manager.is_ready():
@@ -470,14 +491,21 @@ async def websocket_camera_feed(websocket: WebSocket):
                 # Limit frame rate to ~30 FPS
                 await asyncio.sleep(1/30)
 
+            except asyncio.CancelledError:
+                # Gracefully exit on cancellation
+                break
             except Exception as e:
                 logging.error(f"Error streaming frame: {e}")
                 break
 
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError:
+        pass
     finally:
         active_websockets.discard(websocket)
+        if current_task:
+            websocket_tasks.discard(current_task)
 
 
 @app.websocket("/ws/updates")
@@ -488,6 +516,11 @@ async def websocket_system_updates(websocket: WebSocket):
     """
     await websocket.accept()
     active_websockets.add(websocket)
+
+    # Track this handler task
+    current_task = asyncio.current_task()
+    if current_task:
+        websocket_tasks.add(current_task)
 
     try:
         # Send initial status
@@ -503,8 +536,12 @@ async def websocket_system_updates(websocket: WebSocket):
 
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError:
+        pass
     finally:
         active_websockets.discard(websocket)
+        if current_task:
+            websocket_tasks.discard(current_task)
 
 
 # ============================================================================

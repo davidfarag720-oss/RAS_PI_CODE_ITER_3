@@ -294,6 +294,8 @@ class TaskManager:
                 
                 if task_to_execute:
                     # Execute task (will block until complete)
+                    # Store the task future for potential cancellation
+                    task_to_execute._task_future = asyncio.current_task()
                     await self._execute_task(task_to_execute)
                 else:
                     # No tasks - wait before checking again
@@ -371,7 +373,8 @@ class TaskManager:
             self.active_bays.discard(task.bay_id)
             self.reserved_bays.discard(task.bay_id)  # Bay now available
             task._workflow_instance = None
-            
+            task._task_future = None
+
             self.logger.info(f"Bay {task.bay_id} released (hopper empty)")
     
     async def _run_workflow(self, task: Task, workflow):
@@ -440,7 +443,7 @@ class TaskManager:
     async def _cancel_task_internal(self, task: Task):
         """
         Internal cancellation logic.
-        
+
         Args:
             task: Task to cancel
         """
@@ -450,22 +453,37 @@ class TaskManager:
                 self.task_queue.remove(task.id)
             task.status = TaskStatus.CANCELLED
             task.completed_at = datetime.now()
-            
+
             # Release bay reservation
             self.reserved_bays.discard(task.bay_id)
             self.logger.info(f"Bay {task.bay_id} released (task cancelled)")
-            
+
         elif task.status == TaskStatus.RUNNING:
-            # Stop workflow
+            # Stop workflow gracefully first
             if task._workflow_instance:
-                # Workflow should implement stop() method
                 if hasattr(task._workflow_instance, 'stop'):
-                    await task._workflow_instance.stop()
-            
+                    try:
+                        await task._workflow_instance.stop()
+                    except Exception as e:
+                        self.logger.warning(f"Error stopping workflow: {e}")
+
+            # Force-cancel the actual asyncio task if it exists
+            if task._task_future and not task._task_future.done():
+                task._task_future.cancel()
+                try:
+                    await asyncio.wait_for(task._task_future, timeout=2.0)
+                except asyncio.CancelledError:
+                    pass
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"Task {task.id} did not cancel within timeout")
+
             task.status = TaskStatus.CANCELLED
             task.completed_at = datetime.now()
-            
-            # Bay will be released in _execute_task finally block
+
+            # Release bay immediately on forced cancellation
+            self.active_bays.discard(task.bay_id)
+            self.reserved_bays.discard(task.bay_id)
+            self.logger.info(f"Bay {task.bay_id} released (task force-cancelled)")
     
     async def emergency_stop(self):
         """Emergency stop - cancel all tasks"""
