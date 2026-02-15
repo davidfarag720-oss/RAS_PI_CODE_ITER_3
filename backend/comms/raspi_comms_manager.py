@@ -51,18 +51,23 @@ class ProtocolConstants:
 
 class CommandCode(IntEnum):
     """Command codes for STM32"""
-    
+
     # ==================== GATE COMMANDS (0x10 - 0x1F) ====================
     CMD_GATE_OPEN = 0x10        # PARAM1: gate_id (1-6), PARAM2: unused
     CMD_GATE_CLOSE = 0x11       # PARAM1: gate_id (1-6), PARAM2: unused
     CMD_GATE_CYCLE = 0x12       # PARAM1: gate_id (1-6), PARAM2: unused
     CMD_HOPPER_DISPENSE = 0x13  # PARAM1: hopper_id (1-4), PARAM2: unused
                                 # (includes vibration + smart laser detection)
+    CMD_DISPOSE = 0x14          # PARAM1: gate_id (1-2), PARAM2: unused
+    CMD_LOAD_CUTTER = 0x15      # PARAM1: gate_id (1-2), PARAM2: unused
+    CMD_QUERY_GATE = 0x16       # PARAM1: gate_id (1-2), PARAM2: unused
     
     # ==================== CUTTER COMMANDS (0x20 - 0x2F) ====================
     CMD_CUT_EXECUTE = 0x20      # PARAM1: axis bitmask (bit0=X, bit1=Y, bit2=Z)
-    CMD_CUT_HOME = 0x21         # Home all cutter axes
-    CMD_CUT_ABORT = 0x22        # Emergency stop cutters
+    CMD_CUT = 0x21              # Execute cutting cycle with completion notification
+    CMD_GET_CUTTER_STATUS = 0x22  # Query cutter status (idle/busy/error)
+    CMD_CUT_HOME = 0x23         # Home all cutter axes
+    CMD_CUT_ABORT = 0x24        # Emergency stop cutters
     
     # ==================== VIBRATION COMMANDS (0x30 - 0x3F) ====================
     CMD_VIB_SET = 0x30          # PARAM1: hopper_id (1-4), PARAM2: state (0=off, 1=on)
@@ -76,6 +81,7 @@ class CommandCode(IntEnum):
     # ==================== STATUS/QUERY COMMANDS (0x50 - 0x5F) ====================
     CMD_GET_HOPPER_STATUS = 0x50  # Returns bitmask: bit0-3 = empty for hoppers 1-4
     CMD_GET_GATE_STATUS = 0x51    # PARAM1: gate_id, Returns: 0=closed, 1=open, 2=moving
+    CMD_CONFIG_HANDSHAKE = 0x52   # Config validation handshake
     CMD_PING = 0x53               # PARAM1/2: echo values
     
     # ==================== SYSTEM COMMANDS (0xF0 - 0xFF) ====================
@@ -398,6 +404,124 @@ class RaspiCommsManager:
     def is_connected(self) -> bool:
         """Check if serial connection is active."""
         return self.serial is not None and self.serial.is_open and self.running
+
+    # ========================================================================
+    # HIGH-LEVEL COMMAND METHODS
+    # ========================================================================
+
+    def config_handshake(self, num_hoppers: int, num_actuators: int,
+                         bottom_gate: bool, parallelization: bool,
+                         num_vib_motors: int, timeout: float = 1.0) -> Response:
+        """
+        Perform config handshake with STM32.
+
+        Returns:
+            Response with RESP_OK if match, RESP_INVALID_PARAM if mismatch
+        """
+        flags = 0
+        if bottom_gate:
+            flags |= 0x01
+        if parallelization:
+            flags |= 0x02
+
+        return self.send_command(0x52, num_hoppers, num_actuators, timeout=timeout)
+
+    def dispose(self, gate_id: int = 1, timeout: float = 3.0) -> Response:
+        """
+        Execute dispose sequence (Base -> Dispose -> hold -> Base).
+
+        Args:
+            gate_id: Gate ID (1=top, 2=bottom)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Response with RESP_OK on success
+        """
+        return self.send_command(CommandCode.CMD_DISPOSE, gate_id, 0, timeout=timeout)
+
+    def load_cutter(self, gate_id: int = 1, timeout: float = 3.0) -> Response:
+        """
+        Execute load-cutter sequence (Base -> Position C).
+
+        Args:
+            gate_id: Gate ID (1=top, 2=bottom)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Response with RESP_OK on success, RESP_BUSY if cutter busy (parallel mode)
+        """
+        return self.send_command(CommandCode.CMD_LOAD_CUTTER, gate_id, 0, timeout=timeout)
+
+    def cut(self, axis_bitmask: int, timeout: float = 10.0) -> Response:
+        """
+        Execute cutting cycle with completion notification.
+
+        Args:
+            axis_bitmask: Axis bitmask (bit0=X, bit1=Y, bit2=Z)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Response with RESP_OK on success
+        """
+        return self.send_command(CommandCode.CMD_CUT, axis_bitmask, 0, timeout=timeout)
+
+    def hopper_dispense(self, hopper_id: int, timeout: float = 3.0) -> Response:
+        """
+        Dispense from hopper (includes vibration, laser detection, auto-close).
+
+        Args:
+            hopper_id: Hopper ID (1-4)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Response with RESP_OK on success, RESP_TIMEOUT if no laser trigger
+        """
+        return self.send_command(CommandCode.CMD_HOPPER_DISPENSE, hopper_id, 0, timeout=timeout)
+
+    def query_gate(self, gate_id: int = 1, timeout: float = 0.5) -> Response:
+        """
+        Query gate status and position.
+
+        Args:
+            gate_id: Gate ID (1=top, 2=bottom)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Response with:
+                data_l: Gate status (0=IDLE, 1=DISPOSING, 2=LOADING, 3=COMPLETE, 255=ERROR)
+                data_h: Position (0-255 scaled from 0-4095)
+        """
+        return self.send_command(CommandCode.CMD_QUERY_GATE, gate_id, 0, timeout=timeout)
+
+    def query_hopper(self, hopper_id: int, timeout: float = 0.5) -> Response:
+        """
+        Query single hopper status (detailed mode).
+
+        Args:
+            hopper_id: Hopper ID (1-4)
+            timeout: Command timeout in seconds
+
+        Returns:
+            Response with:
+                data_l bits: [0]=empty, [1]=last_success, [2-4]=state
+                data_h bits: [0-3]=consecutive_timeouts, [4-7]=consecutive_successes
+        """
+        return self.send_command(CommandCode.CMD_GET_HOPPER_STATUS, hopper_id, 0, timeout=timeout)
+
+    def query_cutter_status(self, timeout: float = 0.5) -> Response:
+        """
+        Query cutter status.
+
+        Returns:
+            Response with:
+                data_l: Cutter state (0=IDLE, 1=BUSY, 255=ERROR)
+                data_h: Active axis bitmask or error code
+        """
+        return self.send_command(CommandCode.CMD_GET_CUTTER_STATUS, 0, 0, timeout=timeout)
+
+    def emergency_stop(self, timeout: float = 1.0) -> Response:
+        """Emergency stop all motion."""
+        return self.send_command(CommandCode.CMD_EMERGENCY_STOP, 0, 0, timeout=timeout)
 
 
 # ============================================================================
