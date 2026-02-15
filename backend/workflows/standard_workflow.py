@@ -147,6 +147,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
         self.logger.info("Closing gates...")
         self.stm32.gate_close(self.gate_cutter_top)
         await self._wait_async(self.gate_delay)
+        # Bottom gate close (safety - STM32 manages autonomously during cuts)
         self.stm32.gate_close(self.gate_cutter_bottom)
         await self._wait_async(self.gate_delay)
         
@@ -301,6 +302,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
         # Close all gates
         self.stm32.gate_close(self.gate_cutter_top)
         await self._wait_async(self.gate_delay)
+        # Bottom gate close (safety - STM32 manages autonomously during cuts)
         self.stm32.gate_close(self.gate_cutter_bottom)
         
         # Read final weight
@@ -393,70 +395,67 @@ class StandardVegetableWorkflow(BaseWorkflow):
     async def _execute_cut(self) -> bool:
         """
         Execute the cutting sequence.
-        
+
         Standard cutting sequence (from spec Page 2):
         1. Open top gate (entry to cutting chamber)
         2. Wait for item to enter
-        3. Close top gate
+        3. Close top gate (arms bottom gate on STM32)
         4. **START PREFETCH (safe now - gate is closed)**
         5. Execute cut (while prefetch runs in parallel)
-        6. Open bottom gate (exit)
-        7. Wait for product to exit
-        8. Close bottom gate
-        
+        6. STM32 automatically opens/holds/closes bottom gate after cut completes
+
+        Note: Bottom gate is controlled autonomously by STM32 firmware.
+        The gate opens automatically when cutter completes, holds briefly,
+        then closes. RasPi does not send explicit open/close commands.
+
         Returns:
             True if successful, False if error
         """
         self.logger.info("Executing cutting sequence...")
-        
+
         await self._emit_event(WorkflowEvent.CUTTING_STARTED)
-        
+
         try:
             # Open top gate (entry)
             self.logger.debug("Opening top gate...")
             if not self.stm32.gate_open(self.gate_cutter_top):
                 raise HardwareError("Failed to open top gate")
-            
+
             await self._wait_async(self.gate_delay) # TODO: adjust with sensor feedback
-            
-            # Close top gate
+
+            # Close top gate (this arms bottom gate on STM32 for auto-open after cut)
             self.logger.debug("Closing top gate...")
             if not self.stm32.gate_close(self.gate_cutter_top):
                 raise HardwareError("Failed to close top gate")
-            
+
             await self._wait_async(self.gate_delay)
-            
+
             # Gate is now CLOSED - safe to start prefetch for next item
             # This runs in parallel while cutting happens
             item_num = self.current_item + 1
             await self._start_prefetch_next_item(item_num + 1)
-            
+
             # Execute cut using configured axis bitmask
+            # Bottom gate will open automatically when cut completes
             self.logger.debug(
                 f"Executing cut (bitmask: 0b{self.cut_config.axis_bitmask:03b})..."
             )
             if not self.stm32.cut_execute(self.cut_config.axis_bitmask):
                 raise HardwareError("Failed to execute cut")
-            
+
             await self._wait_async(self.cut_delay)
-            
-            # Open bottom gate (exit)
-            self.logger.debug("Opening bottom gate...")
-            if not self.stm32.gate_open(self.gate_cutter_bottom):
-                raise HardwareError("Failed to open bottom gate")
-            
-            await self._wait_async(self.gate_delay)
-            
-            # Close bottom gate
-            self.logger.debug("Closing bottom gate...")
-            if not self.stm32.gate_close(self.gate_cutter_bottom):
-                raise HardwareError("Failed to close bottom gate")
-            
+
+            # Bottom gate handling is automatic on STM32:
+            # - Opens after cut completes
+            # - Holds for BOTTOM_GATE_HOLD_TIME_MS
+            # - Closes automatically
+            # RasPi waits for cutter to report idle (which includes bottom gate cycle)
+
             await self._emit_event(WorkflowEvent.CUTTING_COMPLETED)
-            
+
             self.logger.info("Cutting sequence complete")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Cutting sequence error: {e}", exc_info=True)
             return False
