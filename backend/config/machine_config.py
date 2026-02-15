@@ -21,16 +21,14 @@ class MachineConfig:
 
     def to_handshake_bytes(self) -> tuple:
         """
-        Convert to 4-byte handshake format for CMD_CONFIG_HANDSHAKE.
+        Convert to 2-byte handshake format for CMD_CONFIG_HANDSHAKE.
 
         Returns:
-            (param1, param2, param3, param4) tuple for UART packet
+            (param1, param2) tuple for UART packet
 
         Format:
-            PARAM1: num_hoppers (1-4)
-            PARAM2: num_actuators (1-3)
-            PARAM3: flags byte (bit0=bottom_gate, bit1=parallelization)
-            PARAM4: num_vibration_motors (1-4)
+            PARAM1: bits 0-3=num_hoppers (1-4), bits 4-7=num_actuators (1-3)
+            PARAM2: bits 0-3=num_vib_motors (1-4), bits 4-7=flags (bit0=bottom_gate, bit1=parallelization)
         """
         flags = 0
         if self.bottom_gate_present:
@@ -38,7 +36,11 @@ class MachineConfig:
         if self.parallelization_enabled:
             flags |= 0x02
 
-        return (self.num_hoppers, self.num_actuators, flags, self.num_vibration_motors)
+        # Pack into 2 bytes
+        param1 = (self.num_hoppers & 0x0F) | ((self.num_actuators & 0x0F) << 4)
+        param2 = (self.num_vibration_motors & 0x0F) | ((flags & 0x0F) << 4)
+
+        return (param1, param2)
 
     @classmethod
     def from_dict(cls, data: dict) -> 'MachineConfig':
