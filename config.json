@@ -15,11 +15,19 @@
     "cut_delay": 0.5,
     "max_consecutive_cv_failures": 5
   },
+  "machine_variant": {
+    "active_variant": "mini",
+    "num_hoppers": 1,
+    "num_actuators": 1,
+    "bottom_gate_present": false,
+    "parallelization_enabled": false,
+    "num_vibration_motors": 1
+  },
   "vegetables": [
     {
       "name": "Cucumber",
       "id": "cucumber",
-      "image_path": "cucumber.png",
+      "image_path": "assets/ui/cucumber.jpg",
       "cv_models": {
         "yolo_weights": "cucumber_yolo.pt",
         "efficientnet_weights": "cucumber_efficientnet.pth"
@@ -29,7 +37,7 @@
     {
       "name": "Carrot",
       "id": "carrot",
-      "image_path": "carrot.png",
+      "image_path": "assets/ui/carrot.jpg",
       "cv_models": {
         "yolo_weights": "carrot_yolo.pt",
         "efficientnet_weights": "carrot_efficientnet.pth"
@@ -39,7 +47,7 @@
     {
       "name": "Tomato",
       "id": "tomato",
-      "image_path": "tomato.png",
+      "image_path": "assets/ui/tomato.jpg",
       "cv_models": {
         "yolo_weights": "tomato_yolo.pt",
         "efficientnet_weights": "tomato_efficientnet.pth"
@@ -49,7 +57,7 @@
     {
       "name": "Potato",
       "id": "potato",
-      "image_path": "potato.png",
+      "image_path": "assets/ui/potato.jpg",
       "cv_models": {
         "yolo_weights": "potato_yolo.pt",
         "efficientnet_weights": "potato_efficientnet.pth"
