@@ -31,6 +31,9 @@ from backend.api.models import (
 from backend.api.task_manager import TaskManager, Task, TaskStatus
 from backend.config.config_manager import ConfigManager, get_config, set_config
 from backend.cv.camera_manager import CameraManager
+from backend.comms.raspi_comms_manager import RaspiCommsManager
+from backend.stm32_interface import STM32Interface
+from backend.config.machine_config import get_machine_config
 
 
 # ============================================================================
@@ -41,6 +44,8 @@ from backend.cv.camera_manager import CameraManager
 task_manager: Optional[TaskManager] = None
 camera_manager: Optional[CameraManager] = None
 config: Optional[ConfigManager] = None
+comms_manager: Optional[RaspiCommsManager] = None
+stm32_interface: Optional[STM32Interface] = None
 
 # WebSocket connections for live updates
 active_websockets: Set[WebSocket] = set()
@@ -53,8 +58,9 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
     Initializes and cleans up resources on startup/shutdown.
+    Performs config handshake with STM32 before accepting requests.
     """
-    global task_manager, camera_manager, config, shutdown_event
+    global task_manager, camera_manager, config, shutdown_event, comms_manager, stm32_interface
 
     logger = logging.getLogger('FastAPI')
     logger.info("Starting Vegetable Processing System API...")
@@ -69,6 +75,55 @@ async def lifespan(app: FastAPI):
         set_config(config)
         logger.info("Configuration loaded and validated")
 
+        # Initialize STM32 communications
+        logger.info("Initializing STM32 communications...")
+        try:
+            serial_port = config.get_string('serial_port', '/dev/ttyAMA0')
+            serial_baudrate = config.get_int('serial_baudrate', 115200)
+
+            comms_manager = RaspiCommsManager(port=serial_port, baudrate=serial_baudrate)
+            if not comms_manager.connect():
+                logger.error("Failed to connect to STM32 - running in disconnected mode")
+                stm32_interface = None
+            else:
+                logger.info("STM32 connected successfully")
+                stm32_interface = STM32Interface(comms_manager)
+
+                # Perform config handshake
+                machine_config = get_machine_config()
+                logger.info("Performing config handshake...")
+
+                try:
+                    config_match = await stm32_interface.validate_config(
+                        num_hoppers=machine_config.num_hoppers,
+                        num_actuators=machine_config.num_actuators,
+                        bottom_gate=machine_config.bottom_gate_present,
+                        parallelization=machine_config.parallelization_enabled,
+                        num_vib_motors=machine_config.num_vibration_motors
+                    )
+
+                    if not config_match:
+                        logger.critical(
+                            "CONFIG MISMATCH: RasPi and STM32 configs do not match! "
+                            "Update config.json or reflash STM32 firmware. "
+                            "System will NOT enter main operation."
+                        )
+                        # Store global flag to prevent task creation
+                        app.state.config_mismatch = True
+                    else:
+                        logger.info("Config validation SUCCESS - system ready")
+                        app.state.config_mismatch = False
+
+                except Exception as e:
+                    logger.error(f"Config handshake failed: {e}")
+                    app.state.config_mismatch = True
+
+        except Exception as e:
+            logger.error(f"STM32 initialization failed: {e}")
+            comms_manager = None
+            stm32_interface = None
+            app.state.config_mismatch = True
+
         # Initialize camera
         camera_manager = CameraManager()
         logger.info("Camera initialized")
@@ -77,7 +132,7 @@ async def lifespan(app: FastAPI):
         task_manager = TaskManager(config, camera_manager)
         logger.info("Task manager initialized")
 
-        logger.info("✓ System startup complete")
+        logger.info("System startup complete")
 
         yield
 
@@ -123,7 +178,11 @@ async def lifespan(app: FastAPI):
         if camera_manager:
             camera_manager.close()
 
-        logger.info("✓ Shutdown complete")
+        # 7. Close STM32 communications
+        if comms_manager:
+            comms_manager.disconnect()
+
+        logger.info("Shutdown complete")
 
 
 # ============================================================================
@@ -245,22 +304,30 @@ async def list_cut_types():
 async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTasks):
     """
     Create a new processing task.
-    
+
     CRITICAL RULES:
     - Only ONE task per bay (queued OR running)
     - Task runs until STM32 reports hopper EMPTY
     - NO target count - processes entire hopper
     - Bay becomes available only after hopper is empty
-    
+
     Args:
         request: Task creation request with vegetable, bay, and cut type
-    
+
     Returns:
         Created task details
-        
+
     Raises:
         HTTPException 409: If bay already has a task
+        HTTPException 503: If config mismatch detected
     """
+    # Check for config mismatch (prevents operation if STM32/RasPi configs don't match)
+    if getattr(app.state, 'config_mismatch', False):
+        raise HTTPException(
+            status_code=503,
+            detail="Config mismatch detected - cannot create tasks until resolved. Check logs for details."
+        )
+
     # Validate vegetable exists
     veg = config.get_vegetable(request.vegetable_id)
     if not veg:
