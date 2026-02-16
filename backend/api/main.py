@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
         # Initialize STM32 communications
         logger.info("Initializing STM32 communications...")
         try:
-            serial_port = config.get_string('serial_port', '/dev/ttyAMA0')
+            serial_port = config.get_str('serial_port', '/dev/ttyAMA0')
             serial_baudrate = config.get_int('serial_baudrate', 115200)
 
             comms_manager = RaspiCommsManager(port=serial_port, baudrate=serial_baudrate)
