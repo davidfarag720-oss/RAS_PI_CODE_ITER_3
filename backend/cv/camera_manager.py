@@ -48,7 +48,7 @@ class CameraManager:
         self._init_camera()
         
         # Image save path
-        install_path = self.config.get_str('install_path', '/home/pi/vegetable-slicer')
+        install_path = self.config.get_str('install_path', 'vegetable-slicer')
         self.save_path = Path(install_path) / 'data' / 'cv_images'
         self.save_path.mkdir(parents=True, exist_ok=True)
         

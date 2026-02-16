@@ -3,7 +3,7 @@
     "num_bays": 4,
     "num_cameras": 1,
     "cv_grading_mode": "harsh",
-    "install_path": "/home/pi/vegetable-slicer",
+    "install_path": "/home/dfarag/RAS_PI_CODE_ITER_3",
     "serial_port": "/dev/ttyAMA0",
     "serial_baudrate": 115200,
     "camera_index": 0,
@@ -32,7 +32,10 @@
         "yolo_weights": "cucumber_yolo.pt",
         "efficientnet_weights": "cucumber_efficientnet.pth"
       },
-      "supported_cuts": ["sliced", "cubed"]
+      "supported_cuts": [
+        "sliced",
+        "cubed"
+      ]
     },
     {
       "name": "Carrot",
@@ -42,7 +45,12 @@
         "yolo_weights": "carrot_yolo.pt",
         "efficientnet_weights": "carrot_efficientnet.pth"
       },
-      "supported_cuts": ["long_fry", "short_fry", "sliced", "cubed"]
+      "supported_cuts": [
+        "long_fry",
+        "short_fry",
+        "sliced",
+        "cubed"
+      ]
     },
     {
       "name": "Tomato",
@@ -52,7 +60,10 @@
         "yolo_weights": "tomato_yolo.pt",
         "efficientnet_weights": "tomato_efficientnet.pth"
       },
-      "supported_cuts": ["sliced", "cubed"]
+      "supported_cuts": [
+        "sliced",
+        "cubed"
+      ]
     },
     {
       "name": "Potato",
@@ -62,7 +73,11 @@
         "yolo_weights": "potato_yolo.pt",
         "efficientnet_weights": "potato_efficientnet.pth"
       },
-      "supported_cuts": ["long_fry", "short_fry", "cubed"]
+      "supported_cuts": [
+        "long_fry",
+        "short_fry",
+        "cubed"
+      ]
     }
   ],
   "cut_types": {
