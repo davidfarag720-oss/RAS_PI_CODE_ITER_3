@@ -167,7 +167,7 @@ class SystemConfig:
     """System-wide configuration"""
     
     # Installation path
-    INSTALL_PATH = "/home/pi/vegetable-slicer"
+    INSTALL_PATH = "/home/dfarag/vegetable-slicer"
     
     # Hardware
     NUM_HOPPERS = 4
