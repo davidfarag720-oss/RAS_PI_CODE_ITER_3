@@ -46,6 +46,7 @@ class WorkflowEvent(Enum):
     ERROR = "error"
     EMERGENCY_STOPPED = "emergency_stopped"
     BAY_EMPTY = "bay_empty"
+    HOPPER_EMPTY = "hopper_empty"  # Alias for BAY_EMPTY (frontend compatibility)
     WEIGHT_UPDATE = "weight_update"
 
 

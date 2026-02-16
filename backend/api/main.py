@@ -128,8 +128,13 @@ async def lifespan(app: FastAPI):
         camera_manager = CameraManager()
         logger.info("Camera initialized")
 
-        # Initialize task manager
-        task_manager = TaskManager(config, camera_manager)
+        # Initialize task manager with workflow event callback
+        task_manager = TaskManager(
+            config,
+            camera_manager,
+            stm32_interface=stm32_interface,
+            workflow_event_callback=broadcast_workflow_event
+        )
         logger.info("Task manager initialized")
 
         logger.info("System startup complete")
@@ -281,7 +286,7 @@ async def get_vegetable_cuts(vegetable_id: str):
 async def list_cut_types():
     """
     Get all available cut types.
-    
+
     Returns:
         Dictionary of cut type configurations
     """
@@ -293,6 +298,37 @@ async def list_cut_types():
             description=cut['description']
         )
         for name, cut in cuts.items()
+    }
+
+
+@app.get("/api/config/machine")
+async def get_machine_config():
+    """
+    Get machine variant configuration.
+
+    Returns machine hardware configuration for UI adaptation.
+    Frontend can use this to show/hide features based on variant.
+
+    Returns:
+        Dictionary with machine variant and hardware capabilities
+
+    API Contract (non-breaking addition):
+        Response: {
+            "variant": str,           # "mini" or "vertical"
+            "num_hoppers": int,       # Number of hoppers (1-4)
+            "num_actuators": int,     # Number of cutter actuators (1-3)
+            "bottom_gate_present": bool,  # Bottom gate installed
+            "parallelization_enabled": bool  # Parallel processing enabled
+        }
+    """
+    from backend.config.machine_config import get_machine_config
+    machine_config = get_machine_config()
+    return {
+        "variant": machine_config.active_variant,
+        "num_hoppers": machine_config.num_hoppers,
+        "num_actuators": machine_config.num_actuators,
+        "bottom_gate_present": machine_config.bottom_gate_present,
+        "parallelization_enabled": machine_config.parallelization_enabled
     }
 
 
@@ -310,6 +346,15 @@ async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTa
     - Task runs until STM32 reports hopper EMPTY
     - NO target count - processes entire hopper
     - Bay becomes available only after hopper is empty
+
+    API Contract (MUST remain stable):
+        Request body: {
+            "vegetable_id": str,  # e.g., "cucumber"
+            "cut_type": str,      # e.g., "sliced"
+            "bay_id": int,        # 1-4
+            "workflow_class": Optional[str]  # Optional workflow override
+        }
+        Response: TaskResponse (see models.py)
 
     Args:
         request: Task creation request with vegetable, bay, and cut type
@@ -639,14 +684,48 @@ async def broadcast_system_event(event: dict):
         'type': 'system_event',
         'data': event
     }
-    
+
     disconnected = set()
     for ws in active_websockets:
         try:
             await ws.send_json(message)
         except:
             disconnected.add(ws)
-    
+
+    active_websockets.difference_update(disconnected)
+
+
+async def broadcast_workflow_event(event_name: str, event_data: dict):
+    """
+    Broadcast workflow event to all connected WebSocket clients.
+
+    Args:
+        event_name: WorkflowEvent enum value (e.g., "item_dispensed")
+        event_data: Event data dictionary
+
+    WebSocket Message Format (API contract):
+        {
+            "type": "workflow_event",
+            "event": str,              # Event name (e.g., "item_dispensed", "hopper_empty")
+            "data": dict,              # Event-specific data
+            "timestamp": float         # Unix timestamp
+        }
+    """
+    import time
+    message = {
+        'type': 'workflow_event',
+        'event': event_name,
+        'data': event_data,
+        'timestamp': time.time()
+    }
+
+    disconnected = set()
+    for ws in active_websockets:
+        try:
+            await ws.send_json(message)
+        except:
+            disconnected.add(ws)
+
     active_websockets.difference_update(disconnected)
 
 

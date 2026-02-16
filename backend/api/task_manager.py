@@ -138,7 +138,7 @@ class TaskManager:
     - Error handling
     """
     
-    def __init__(self, config, camera_manager, stm32_interface=None):
+    def __init__(self, config, camera_manager, stm32_interface=None, workflow_event_callback=None):
         """
         Initialize task manager.
 
@@ -146,24 +146,26 @@ class TaskManager:
             config: ConfigManager instance
             camera_manager: CameraManager instance
             stm32_interface: Optional STM32Interface instance (uses MockSTM32 if None)
+            workflow_event_callback: Optional async callback for workflow events (event_name, event_data)
         """
         self.logger = logging.getLogger('TaskManager')
         self.config = config
         self.camera_manager = camera_manager
         self.stm32_interface = stm32_interface or MockSTM32Interface()
-        
+        self.workflow_event_callback = workflow_event_callback
+
         # Task storage
         self.tasks: Dict[str, Task] = {}  # task_id -> Task
         self.task_queue: List[str] = []  # FIFO queue of task IDs
-        
+
         # Bay tracking
         self.reserved_bays: Set[int] = set()  # Bays with tasks (queued OR running)
         self.active_bays: Set[int] = set()    # Bays currently running
-        
+
         # Execution control
         self.running = False
         self.executor_task: Optional[asyncio.Task] = None
-        
+
         # Start task executor
         self.start_executor()
     
@@ -331,6 +333,26 @@ class TaskManager:
             # Get vegetable config
             veg_config = self.config.get_vegetable(task.vegetable_id)
             
+            # Create workflow event callback wrapper
+            async def workflow_update_callback(event_data: dict):
+                """Wrapper to broadcast workflow events and update task stats"""
+                event_name = event_data.get("event", "unknown")
+
+                # Update task statistics based on event
+                if event_name == "item_completed":
+                    task.items_processed += 1
+                elif event_name == "cv_rejected":
+                    task.items_rejected += 1
+                elif event_name == "weight_update":
+                    task.weight_processed_grams = event_data.get("total_weight", 0.0)
+
+                # Broadcast to WebSocket clients
+                if self.workflow_event_callback:
+                    try:
+                        await self.workflow_event_callback(event_name, event_data)
+                    except Exception as e:
+                        self.logger.error(f"Error in workflow event callback: {e}")
+
             # Instantiate workflow
             workflow = workflow_class(
                 stm32_interface=self.stm32_interface,
@@ -338,7 +360,8 @@ class TaskManager:
                 vegetable_config=veg_config,
                 bay_id=task.bay_id,
                 cut_type=task.cut_type,
-                target_count=1000  # Process until hopper empty
+                target_count=1000,  # Process until hopper empty
+                update_callback=workflow_update_callback
             )
 
             task._workflow_instance = workflow
