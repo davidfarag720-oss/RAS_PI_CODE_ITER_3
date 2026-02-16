@@ -19,6 +19,7 @@ from typing import Optional, Dict
 
 from .base_workflow import BaseWorkflow, WorkflowEvent, HardwareError, CVError
 from backend.config import get_config, VegetableConfig, CutTypeConfig
+from backend.stm32_interface import STM32Interface
 
 
 class StandardVegetableWorkflow(BaseWorkflow):
@@ -126,55 +127,55 @@ class StandardVegetableWorkflow(BaseWorkflow):
     async def setup(self):
         """
         Initialize workflow - tare scale, verify bay, close gates.
-        
+
         Implements pre-workflow setup as per spec.
         """
         self.logger.info(f"Setting up {self.workflow_name} workflow...")
-        
+
         # Tare the scale
         self.logger.info("Taring scale...")
-        if not self.stm32.scale_tare():
-            raise HardwareError("Failed to tare scale")
-        
+        try:
+            # Scale operations are not in STM32Interface, call directly on comms
+            if not self.stm32.comms.scale_tare():
+                raise HardwareError("Failed to tare scale")
+        except Exception as e:
+            self.logger.warning(f"Scale tare failed: {e}")
+
         await self._wait_async(0.5)
-        
+
         # Verify bay is not empty
-        if self.stm32.is_hopper_empty(self.bay_id):
-            self.bay_empty = True
-            raise HardwareError(f"Bay {self.bay_id} is empty")
-        
-        # Ensure gates are closed
-        self.logger.info("Closing gates...")
-        self.stm32.gate_close(self.gate_cutter_top)
-        await self._wait_async(self.gate_delay)
-        # Bottom gate close (safety - STM32 manages autonomously during cuts)
-        self.stm32.gate_close(self.gate_cutter_bottom)
-        await self._wait_async(self.gate_delay)
-        
+        try:
+            is_empty = await self.stm32.is_hopper_empty(self.bay_id)
+            if is_empty:
+                self.bay_empty = True
+                raise HardwareError(f"Bay {self.bay_id} is empty")
+        except Exception as e:
+            raise HardwareError(f"Failed to check hopper status: {e}")
+
         self.logger.info("Setup complete")
     
     async def process_single_item(self) -> bool:
         """
         Process one item through the standard workflow sequence.
-        
+
         Uses pipelined processing: while current item is cutting, the next item
-        is dispensed and CV-checked in parallel. Prefetch starts AFTER the top
-        gate closes to prevent items from falling into an open gate.
-        
+        is dispensed and CV-checked in parallel. Prefetch starts AFTER the gate
+        closes to prevent items from falling into an open gate.
+
         Standard Processing Sequence (from spec Page 2):
         1. Dispense: Vegetable falls from bay into staging area
         2. CV Analysis: Overhead camera captures static image
-        3. Validation: If "Accepted", top gate opens; vegetable enters chamber
-        4. Top gate closes (SAFE to dispense next item now)
-        5. Cut: Execute cut cycle (while prefetching next item in parallel)
-        6. Exit: Bottom gate opens to release product
-        
+        3. Route based on CV:
+           - If rejected: dispose (to waste)
+           - If accepted: load_cutter -> cut -> bottom gate auto-opens
+        4. Repeat until target reached or bay empty
+
         Returns:
             True if successfully processed, False if error or rejected
         """
         item_num = self.current_item + 1
         self.logger.info(f"=== Processing item {item_num}/{self.target_count} ===")
-        
+
         try:
             # Check if we have a prefetched result from previous iteration
             if self._prefetch_result and self._prefetch_item_number == item_num:
@@ -186,21 +187,23 @@ class StandardVegetableWorkflow(BaseWorkflow):
             else:
                 # No prefetch available, do it now (first item or prefetch failed)
                 # Step 1: Dispense from bay into staging area
-                if not await self._dispense_from_bay():
+                success = await self._dispense_from_bay()
+                if not success:
+                    # Timeout - possibly empty, let caller check
                     return False
-                
+
                 # Step 2: Wait for settling in staging area
                 await self._wait_async(self.staging_delay)
-                
+
                 # Step 3: Run CV analysis
                 cv_result = await self._run_cv_check()
-            
-            # Validate CV result
+
+            # Validate CV result and route accordingly
             if not cv_result['accepted']:
-                # Rejected by CV
+                # REJECTION PATH: Dispose to waste
                 self.cv_rejected_items += 1
                 self.consecutive_cv_failures += 1
-                
+
                 await self._emit_event(
                     WorkflowEvent.CV_REJECTED,
                     {
@@ -210,38 +213,59 @@ class StandardVegetableWorkflow(BaseWorkflow):
                         "bay_id": self.bay_id
                     }
                 )
-                
+
                 self.logger.warning(
                     f"Item {item_num} rejected by CV: {cv_result.get('reason', 'unknown')}"
                 )
-                
-                # TODO: Dispense to waste bin (future feature)
-                
+
+                # Execute dispose sequence via STM32Interface
+                try:
+                    await self.stm32.dispose(gate_id=1)
+                    await self._emit_event(WorkflowEvent.DISPOSE_COMPLETE)
+                except Exception as e:
+                    self.logger.error(f"Dispose sequence failed: {e}")
+
                 # Start prefetching next item before returning
                 await self._start_prefetch_next_item(item_num + 1)
-                
+
                 return False
-            
-            # Reset consecutive failure counter on success
+
+            # ACCEPTANCE PATH: Load and cut
             self.consecutive_cv_failures = 0
-            
-            # Step 4: Execute cutting sequence
+
+            await self._emit_event(
+                WorkflowEvent.ITEM_ACCEPTED,
+                {
+                    "item": item_num,
+                    "confidence": cv_result.get('confidence', 0.0),
+                    "quality": cv_result.get('quality', 'good')
+                }
+            )
+
+            # Execute cutting sequence
             if not await self._execute_cut():
                 return False
-            
+
             # Step 5: Read scale for telemetry
-            weight = self.stm32.scale_read()
-            if weight is not None:
-                self.total_weight_processed += weight
-                await self._emit_event(
-                    WorkflowEvent.WEIGHT_UPDATE,
-                    {"total_weight": self.total_weight_processed}
-                )
-            
+            try:
+                weight = self.stm32.comms.scale_read()
+                if weight is not None:
+                    self.total_weight_processed += weight
+                    await self._emit_event(
+                        WorkflowEvent.WEIGHT_UPDATE,
+                        {"total_weight": self.total_weight_processed}
+                    )
+            except Exception as e:
+                self.logger.warning(f"Failed to read scale: {e}")
+
             self.current_item += 1
+            await self._emit_event(
+                WorkflowEvent.ITEM_COMPLETE,
+                {"count": self.current_item}
+            )
             self.logger.info(f"Item {item_num} completed successfully")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Error processing item {item_num}: {e}", exc_info=True)
             return False
@@ -249,12 +273,12 @@ class StandardVegetableWorkflow(BaseWorkflow):
     async def should_continue(self) -> bool:
         """
         Check if workflow should continue.
-        
+
         Stop conditions:
         - Target count reached
         - Bay empty
         - Too many consecutive CV failures
-        
+
         Returns:
             False if any stop condition is met
         """
@@ -262,14 +286,19 @@ class StandardVegetableWorkflow(BaseWorkflow):
         if self.current_item >= self.target_count:
             self.logger.info(f"Target of {self.target_count} items reached")
             return False
-        
+
         # Check bay empty
-        if self.stm32.is_hopper_empty(self.bay_id):
-            self.bay_empty = True
-            await self._emit_event(WorkflowEvent.BAY_EMPTY, {"bay_id": self.bay_id})
-            self.logger.warning(f"Bay {self.bay_id} is empty")
+        try:
+            is_empty = await self.stm32.is_hopper_empty(self.bay_id)
+            if is_empty:
+                self.bay_empty = True
+                await self._emit_event(WorkflowEvent.BAY_EMPTY, {"bay_id": self.bay_id})
+                self.logger.warning(f"Bay {self.bay_id} is empty")
+                return False
+        except Exception as e:
+            self.logger.error(f"Failed to check hopper status: {e}")
             return False
-        
+
         # Check consecutive CV failures (safety)
         if self.consecutive_cv_failures >= self.max_cv_failures:
             self.logger.error(
@@ -281,13 +310,13 @@ class StandardVegetableWorkflow(BaseWorkflow):
                 {"message": "Too many consecutive CV failures"}
             )
             return False
-        
+
         return True
     
     async def cleanup(self):
         """Clean up after workflow completion."""
         self.logger.info("Cleaning up...")
-        
+
         # Cancel any pending prefetch task
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
@@ -295,21 +324,21 @@ class StandardVegetableWorkflow(BaseWorkflow):
                 await self._prefetch_task
             except asyncio.CancelledError:
                 pass
-        
+
         # Turn off all vibration (if it was enabled)
-        self.stm32.vibration_all_off()
-        
-        # Close all gates
-        self.stm32.gate_close(self.gate_cutter_top)
-        await self._wait_async(self.gate_delay)
-        # Bottom gate close (safety - STM32 manages autonomously during cuts)
-        self.stm32.gate_close(self.gate_cutter_bottom)
-        
+        try:
+            self.stm32.comms.vibration_all_off()
+        except Exception as e:
+            self.logger.warning(f"Failed to turn off vibration: {e}")
+
         # Read final weight
-        final_weight = self.stm32.scale_read()
-        if final_weight is not None:
-            self.logger.info(f"Total weight processed: {self.total_weight_processed:.1f}g")
-        
+        try:
+            final_weight = self.stm32.comms.scale_read()
+            if final_weight is not None:
+                self.logger.info(f"Total weight processed: {self.total_weight_processed:.1f}g")
+        except Exception as e:
+            self.logger.warning(f"Failed to read final weight: {e}")
+
         self.logger.info("Cleanup complete")
     
     # ========================================================================
@@ -319,28 +348,36 @@ class StandardVegetableWorkflow(BaseWorkflow):
     async def _dispense_from_bay(self) -> bool:
         """
         Dispense one item from the bay.
-        
+
         Uses CMD_HOPPER_DISPENSE which includes vibration and smart laser detection.
-        
+        Returns False on timeout (possibly empty) to trigger empty check.
+
         Returns:
-            True if successful, False if error
+            True if laser triggered (success), False if timeout
         """
         self.logger.info(f"Dispensing from bay {self.bay_id}...")
-        
+
         await self._emit_event(
             WorkflowEvent.ITEM_DISPENSED,
             {"bay_id": self.bay_id}
         )
-        
-        # Hopper dispense includes vibration and smart laser detection
-        success = self.stm32.hopper_dispense(self.bay_id)
-        
-        if not success:
-            self.logger.error(f"Failed to dispense from bay {self.bay_id}")
+
+        try:
+            # Hopper dispense includes vibration and smart laser detection
+            # Returns True if laser triggered, False if timeout
+            success = await self.stm32.hopper_dispense(self.bay_id)
+
+            if not success:
+                # Timeout - possibly empty
+                self.logger.warning(f"Hopper {self.bay_id} dispense timeout (possibly empty)")
+                return False
+
+            self.logger.debug("Dispense successful")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Dispense error: {e}")
             return False
-        
-        self.logger.debug("Dispense successful")
-        return True
     
     async def _run_cv_check(self) -> dict:
         """
@@ -397,12 +434,9 @@ class StandardVegetableWorkflow(BaseWorkflow):
         Execute the cutting sequence.
 
         Standard cutting sequence (from spec Page 2):
-        1. Open top gate (entry to cutting chamber)
-        2. Wait for item to enter
-        3. Close top gate (arms bottom gate on STM32)
-        4. **START PREFETCH (safe now - gate is closed)**
-        5. Execute cut (while prefetch runs in parallel)
-        6. STM32 automatically opens/holds/closes bottom gate after cut completes
+        1. Load cutter (waits for cutter idle if parallel mode)
+        2. Execute cut (while prefetch runs in parallel)
+        3. Wait for cutter idle (includes bottom gate cycle)
 
         Note: Bottom gate is controlled autonomously by STM32 firmware.
         The gate opens automatically when cutter completes, holds briefly,
@@ -416,19 +450,12 @@ class StandardVegetableWorkflow(BaseWorkflow):
         await self._emit_event(WorkflowEvent.CUTTING_STARTED)
 
         try:
-            # Open top gate (entry)
-            self.logger.debug("Opening top gate...")
-            if not self.stm32.gate_open(self.gate_cutter_top):
-                raise HardwareError("Failed to open top gate")
+            # Load cutter (waits for cutter idle if parallel mode interlock)
+            self.logger.debug("Loading cutter...")
+            await self.stm32.load_cutter(gate_id=1, wait_for_cutter_idle=True)
 
-            await self._wait_async(self.gate_delay) # TODO: adjust with sensor feedback
-
-            # Close top gate (this arms bottom gate on STM32 for auto-open after cut)
-            self.logger.debug("Closing top gate...")
-            if not self.stm32.gate_close(self.gate_cutter_top):
-                raise HardwareError("Failed to close top gate")
-
-            await self._wait_async(self.gate_delay)
+            await self._emit_event(WorkflowEvent.GATE_LOADED)
+            self.logger.debug("Item loaded into cutting chamber")
 
             # Gate is now CLOSED - safe to start prefetch for next item
             # This runs in parallel while cutting happens
@@ -436,20 +463,14 @@ class StandardVegetableWorkflow(BaseWorkflow):
             await self._start_prefetch_next_item(item_num + 1)
 
             # Execute cut using configured axis bitmask
-            # Bottom gate will open automatically when cut completes
             self.logger.debug(
                 f"Executing cut (bitmask: 0b{self.cut_config.axis_bitmask:03b})..."
             )
-            if not self.stm32.cut_execute(self.cut_config.axis_bitmask):
-                raise HardwareError("Failed to execute cut")
+            await self.stm32.cut(self.cut_config.axis_bitmask)
 
-            await self._wait_async(self.cut_delay)
-
-            # Bottom gate handling is automatic on STM32:
-            # - Opens after cut completes
-            # - Holds for BOTTOM_GATE_HOLD_TIME_MS
-            # - Closes automatically
-            # RasPi waits for cutter to report idle (which includes bottom gate cycle)
+            # Wait for cutter to become idle (ensures bottom gate sequence completes)
+            self.logger.debug("Waiting for cutter to return to idle...")
+            await self.stm32.wait_for_cutter_idle(timeout=30.0)
 
             await self._emit_event(WorkflowEvent.CUTTING_COMPLETED)
 
@@ -463,10 +484,10 @@ class StandardVegetableWorkflow(BaseWorkflow):
     async def _start_prefetch_next_item(self, next_item_num: int):
         """
         Start prefetching the next item in parallel (dispense + CV).
-        
+
         This runs while the current item is being cut, so the next item
         is ready as soon as cutting finishes.
-        
+
         Args:
             next_item_num: Item number to prefetch
         """
@@ -474,12 +495,17 @@ class StandardVegetableWorkflow(BaseWorkflow):
         if next_item_num > self.target_count:
             self.logger.debug("Skipping prefetch - at target")
             return
-        
+
         # Don't prefetch if bay is empty
-        if self.stm32.is_hopper_empty(self.bay_id):
-            self.logger.debug("Skipping prefetch - bay empty")
+        try:
+            is_empty = await self.stm32.is_hopper_empty(self.bay_id)
+            if is_empty:
+                self.logger.debug("Skipping prefetch - bay empty")
+                return
+        except Exception as e:
+            self.logger.warning(f"Failed to check hopper status in prefetch: {e}")
             return
-        
+
         # Cancel any existing prefetch task
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
@@ -487,7 +513,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
                 await self._prefetch_task
             except asyncio.CancelledError:
                 pass
-        
+
         # Start new prefetch task
         self.logger.debug(f"Starting prefetch for item {next_item_num}")
         self._prefetch_task = asyncio.create_task(
