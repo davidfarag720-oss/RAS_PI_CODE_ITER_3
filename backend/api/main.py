@@ -216,7 +216,7 @@ app.add_middleware(
 # ============================================================================
 
 # Serve vegetable images and other assets
-install_path = Path("/home/pi/vegetable-slicer")
+install_path = Path("/home/dfarag/vegetable-slicer")
 assets_path = install_path / "assets"
 
 # Also check for local development paths

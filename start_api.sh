@@ -35,7 +35,7 @@ pip install -q -r requirements.txt
 # Create necessary directories
 echo ""
 echo "Creating directories..."
-mkdir -p /home/pi/vegetable-slicer/{data/cv_images,logs,models,assets/ui}
+mkdir -p /home/dfarag/vegetable-slicer/{data/cv_images,logs,models,assets/ui}
 
 # Validate configuration
 echo ""

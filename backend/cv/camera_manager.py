@@ -207,7 +207,7 @@ class CameraManager:
         # TODO: Implement actual model loading
         # For now, this is a placeholder
         
-        install_path = self.config.get_str('install_path', '/home/pi/vegetable-slicer')
+        install_path = self.config.get_str('install_path', '/home/dfarag/vegetable-slicer')
         models_path = Path(install_path) / 'models'
         
         yolo_path = models_path / vegetable_config.yolo_weights
