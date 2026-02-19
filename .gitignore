@@ -14,3 +14,6 @@ venv/
 # Claude
 .claude/
 CLAUDE.md
+
+# Design mockups
+mockups/
