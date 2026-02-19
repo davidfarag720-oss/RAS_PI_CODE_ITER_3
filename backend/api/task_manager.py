@@ -559,10 +559,13 @@ class TaskManager:
     def get_available_bays(self) -> Set[int]:
         """
         Get bays that are available (no queued or running tasks).
-        
+        Uses num_hoppers from machine config as the source of truth
+        for how many physical bays exist.
+
         Returns:
             Set of available bay numbers
         """
-        num_bays = self.config.get_int('num_bays', 4)
+        from backend.config.machine_config import get_machine_config
+        num_bays = get_machine_config().num_hoppers
         all_bays = set(range(1, num_bays + 1))
         return all_bays - self.reserved_bays

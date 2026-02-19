@@ -35,6 +35,8 @@ export function ProcessingScreen() {
     }, {} as Record<string, string>);
   }, [state.cutTypes]);
 
+  const allBaysBusy = (state.systemStatus?.available_bays ?? []).length === 0;
+
   const handleQueueNewTask = () => {
     navigate('/select');
   };
@@ -117,6 +119,7 @@ export function ProcessingScreen() {
             variant="ghost"
             fullWidth
             size="lg"
+            disabled={allBaysBusy}
             className="border-2 border-dashed border-gray-300"
             icon={
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -124,7 +127,7 @@ export function ProcessingScreen() {
               </svg>
             }
           >
-            Queue New Task
+            {allBaysBusy ? 'Queue Full' : 'Queue New Task'}
           </Button>
           <Button
             onClick={handleViewQueue}

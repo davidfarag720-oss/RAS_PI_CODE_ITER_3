@@ -385,8 +385,9 @@ async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTa
             detail=f"Cut type '{request.cut_type}' not supported for {veg.name}"
         )
     
-    # Validate bay is valid (1-4)
-    num_bays = config.get_int('num_bays', 4)
+    # Validate bay is valid (1 to num_hoppers)
+    from backend.config.machine_config import get_machine_config
+    num_bays = get_machine_config().num_hoppers
     if request.bay_id < 1 or request.bay_id > num_bays:
         raise HTTPException(status_code=400, detail=f"Invalid bay ID: {request.bay_id}")
     

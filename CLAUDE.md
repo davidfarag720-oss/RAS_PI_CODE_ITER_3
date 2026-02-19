@@ -148,6 +148,8 @@ Touch-optimized interface with White/Grey/Green palette:
    - Queue list view
    - Large red "STOP" button
 
+> **Queueing constraint:** Queueing a new task requires selecting an available (non-busy) bay, because the user must physically place the vegetable in the bay at queue time. You cannot queue to a bay that is currently occupied/running. As a result, the "Queue New Task" button must be disabled (or the flow blocked) when all configured bays are in use. With only 1 configured hopper and it busy, queueing is not possible and the option should be hidden/disabled. Multi-bay queueing is not currently a supported feature.
+
 ## API Structure
 
 REST endpoints: `/api/vegetables`, `/api/cut-types`, `/api/tasks` (CRUD), `/api/status`, `/api/emergency-stop`

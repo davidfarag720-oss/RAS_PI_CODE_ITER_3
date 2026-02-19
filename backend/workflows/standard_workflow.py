@@ -64,8 +64,9 @@ class StandardVegetableWorkflow(BaseWorkflow):
         # Get configuration
         self.config = get_config()
         
-        # Validate bay_id
-        num_bays = self.config.get_int('num_bays', 4)
+        # Validate bay_id against actual hopper count
+        from backend.config.machine_config import get_machine_config
+        num_bays = get_machine_config().num_hoppers
         if bay_id < 1 or bay_id > num_bays:
             raise ValueError(f"Invalid bay_id: {bay_id} (must be 1-{num_bays})")
         

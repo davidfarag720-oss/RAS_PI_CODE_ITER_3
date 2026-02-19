@@ -22,10 +22,13 @@ export function ConfigurationScreen() {
     if (vegetable && vegetable.supported_cuts.length > 0 && !selectedCut) {
       setSelectedCut(vegetable.supported_cuts[0]);
     }
-    if (state.systemStatus?.available_bays && state.systemStatus.available_bays.length > 0) {
-      if (!selectedBay) {
-        setSelectedBay(state.systemStatus.available_bays[0]);
+    const availableBays = state.systemStatus?.available_bays ?? [];
+    if (availableBays.length > 0) {
+      if (!selectedBay || !availableBays.includes(selectedBay)) {
+        setSelectedBay(availableBays[0]);
       }
+    } else {
+      setSelectedBay(null);
     }
   }, [vegetable, state.systemStatus, selectedCut, selectedBay]);
 
