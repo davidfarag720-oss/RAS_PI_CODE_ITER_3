@@ -292,7 +292,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
             is_empty = await self.stm32.is_hopper_empty(self.bay_id)
             if is_empty:
                 self.bay_empty = True
-                await self._emit_event(WorkflowEvent.BAY_EMPTY, {"bay_id": self.bay_id})
+                await self._emit_event(WorkflowEvent.HOPPER_EMPTY, {"bay_id": self.bay_id})
                 self.logger.warning(f"Bay {self.bay_id} is empty")
                 return False
         except Exception as e:
