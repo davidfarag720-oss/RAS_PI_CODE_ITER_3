@@ -29,39 +29,53 @@ class MockSTM32Interface:
         self._hopper_items = {1: random.randint(30, 80), 2: random.randint(30, 80),
                              3: random.randint(30, 80), 4: random.randint(30, 80)}
 
-    def scale_tare(self) -> bool:
+    async def scale_tare(self) -> bool:
         self.logger.debug("Mock: Scale tared")
         return True
 
-    def scale_read(self) -> float:
+    async def scale_read(self) -> float:
         return random.uniform(20.0, 100.0)
 
-    def is_hopper_empty(self, bay_id: int) -> bool:
+    async def is_hopper_empty(self, bay_id: int) -> bool:
         return self._hopper_items.get(bay_id, 0) <= 0
 
-    def hopper_dispense(self, bay_id: int) -> bool:
+    async def hopper_dispense(self, bay_id: int) -> bool:
         if self._hopper_items.get(bay_id, 0) > 0:
             self._hopper_items[bay_id] -= 1
             self.logger.debug(f"Mock: Dispensed from bay {bay_id}, {self._hopper_items[bay_id]} remaining")
             return True
         return False
 
-    def gate_open(self, gate_id: int) -> bool:
+    async def gate_open(self, gate_id: int) -> bool:
         self.logger.debug(f"Mock: Gate {gate_id} opened")
         return True
 
-    def gate_close(self, gate_id: int) -> bool:
+    async def gate_close(self, gate_id: int) -> bool:
         self.logger.debug(f"Mock: Gate {gate_id} closed")
         return True
 
-    def cut_execute(self, axis_bitmask: int) -> bool:
+    async def dispose(self, gate_id: int = 1) -> None:
+        self.logger.debug(f"Mock: Dispose via gate {gate_id}")
+
+    async def load_cutter(self, gate_id: int = 1, wait_for_cutter_idle: bool = True) -> None:
+        self.logger.debug(f"Mock: Load cutter via gate {gate_id}")
+        await asyncio.sleep(0.1)
+
+    async def cut(self, axis_bitmask: int) -> None:
+        self.logger.debug(f"Mock: Cut with bitmask {axis_bitmask:03b}")
+        await asyncio.sleep(0.2)
+
+    async def wait_for_cutter_idle(self, timeout: float = 30.0, poll_interval: float = 0.2) -> None:
+        self.logger.debug("Mock: Cutter idle")
+
+    async def cut_execute(self, axis_bitmask: int) -> bool:
         self.logger.debug(f"Mock: Cut executed with bitmask {axis_bitmask:03b}")
         return True
 
-    def vibration_all_off(self) -> bool:
+    async def vibration_all_off(self) -> bool:
         return True
 
-    def emergency_stop(self) -> bool:
+    async def emergency_stop(self) -> bool:
         self.logger.warning("Mock: Emergency stop")
         return True
 

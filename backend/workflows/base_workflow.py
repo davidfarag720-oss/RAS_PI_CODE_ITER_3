@@ -48,6 +48,9 @@ class WorkflowEvent(Enum):
     BAY_EMPTY = "bay_empty"
     HOPPER_EMPTY = "hopper_empty"  # Alias for BAY_EMPTY (frontend compatibility)
     WEIGHT_UPDATE = "weight_update"
+    GATE_LOADED = "gate_loaded"
+    DISPOSE_COMPLETE = "dispose_complete"
+    ITEM_COMPLETE = "item_complete"
 
 
 class BaseWorkflow(ABC):

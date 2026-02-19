@@ -235,7 +235,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
             self.consecutive_cv_failures = 0
 
             await self._emit_event(
-                WorkflowEvent.ITEM_ACCEPTED,
+                WorkflowEvent.CV_ACCEPTED,
                 {
                     "item": item_num,
                     "confidence": cv_result.get('confidence', 0.0),
