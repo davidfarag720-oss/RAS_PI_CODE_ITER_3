@@ -17,3 +17,9 @@ CLAUDE.md
 
 # Design mockups
 mockups/
+
+# Windows null device artifact
+nul
+
+# Claude local settings
+.claude/settings.local.json
