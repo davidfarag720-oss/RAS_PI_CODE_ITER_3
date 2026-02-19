@@ -8,6 +8,8 @@ import {
   getCutTypes,
   getTasks,
   getSystemStatus,
+  getMachineConfig,
+  MachineConfig,
 } from '../api';
 import { useSystemUpdates } from '../hooks';
 
@@ -16,6 +18,7 @@ interface AppState {
   cutTypes: CutType[];
   tasks: Task[];
   systemStatus: SystemStatus | null;
+  machineConfig: MachineConfig | null;
   isLoading: boolean;
   error: string | null;
 }
@@ -28,6 +31,7 @@ type AppAction =
   | { type: 'UPDATE_TASK'; payload: Task }
   | { type: 'REMOVE_TASK'; payload: string }
   | { type: 'SET_SYSTEM_STATUS'; payload: SystemStatus }
+  | { type: 'SET_MACHINE_CONFIG'; payload: MachineConfig }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string | null };
 
@@ -36,6 +40,7 @@ const initialState: AppState = {
   cutTypes: [],
   tasks: [],
   systemStatus: null,
+  machineConfig: null,
   isLoading: true,
   error: null,
 };
@@ -64,6 +69,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
     case 'SET_SYSTEM_STATUS':
       return { ...state, systemStatus: action.payload };
+    case 'SET_MACHINE_CONFIG':
+      return { ...state, machineConfig: action.payload };
     case 'SET_LOADING':
       return { ...state, isLoading: action.payload };
     case 'SET_ERROR':
@@ -93,17 +100,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_ERROR', payload: null });
 
     try {
-      const [vegetables, cutTypes, tasks, status] = await Promise.all([
+      const [vegetables, cutTypes, tasks, status, machineConfig] = await Promise.all([
         getVegetables(),
         getCutTypes(),
         getTasks(),
         getSystemStatus(),
+        getMachineConfig(),
       ]);
 
       dispatch({ type: 'SET_VEGETABLES', payload: vegetables });
       dispatch({ type: 'SET_CUT_TYPES', payload: cutTypes });
       dispatch({ type: 'SET_TASKS', payload: tasks });
       dispatch({ type: 'SET_SYSTEM_STATUS', payload: status });
+      dispatch({ type: 'SET_MACHINE_CONFIG', payload: machineConfig });
     } catch (error) {
       console.error('Failed to load data:', error);
       dispatch({

@@ -95,7 +95,7 @@ export function ConfigurationScreen() {
         {state.systemStatus && (
           <BaySelector
             availableBays={state.systemStatus.available_bays}
-            totalBays={4}
+            totalBays={state.machineConfig?.num_hoppers || 1}
             selectedBay={selectedBay}
             onSelect={setSelectedBay}
           />

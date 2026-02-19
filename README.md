@@ -520,7 +520,7 @@ WS   /ws                      # WebSocket for real-time updates
 
 ```bash
 # On Raspberry Pi 5
-cd /home/pi
+cd /home/dfarag
 git clone <your-repo> vegetable-slicer
 cd vegetable-slicer
 

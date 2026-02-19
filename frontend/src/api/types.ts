@@ -70,3 +70,11 @@ export interface SystemUpdate {
 export interface ApiError {
   detail: string;
 }
+
+export interface MachineConfig {
+  variant: string;
+  num_hoppers: number;
+  num_actuators: number;
+  bottom_gate_present: boolean;
+  parallelization_enabled: boolean;
+}
