@@ -142,7 +142,8 @@ async def lifespan(app: FastAPI):
             config,
             camera_manager,
             stm32_interface=stm32_interface,
-            workflow_event_callback=broadcast_workflow_event
+            workflow_event_callback=broadcast_workflow_event,
+            task_status_callback=broadcast_task_update
         )
         logger.info("Task manager initialized")
 
@@ -538,13 +539,37 @@ async def emergency_stop():
     """
     Emergency stop - cancel all tasks and halt system.
     """
+    # Send hardware e-stop first
+    if stm32_interface:
+        await stm32_interface.emergency_stop()
+
     await task_manager.emergency_stop()
-    
+
     # Broadcast to all WebSocket clients
     await broadcast_system_event({
         'event': 'emergency_stop',
         'timestamp': asyncio.get_event_loop().time()
     })
+
+
+@app.post("/api/restart", status_code=200)
+async def restart_system():
+    """
+    Recalibrate STM32 actuators and re-queue all STOPPED tasks.
+
+    Sequence: reset_system -> home_actuators (~30s) -> re-queue stopped tasks.
+    """
+    if not stm32_interface:
+        raise HTTPException(status_code=503, detail="STM32 not connected")
+
+    count = await task_manager.restart(stm32_interface)
+
+    await broadcast_system_event({
+        'event': 'system_restarted',
+        'tasks_requeued': count
+    })
+
+    return {"tasks_requeued": count}
 
 
 # ============================================================================
