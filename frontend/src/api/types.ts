@@ -42,7 +42,8 @@ export type TaskStatus =
   | 'paused'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'stopped';   // Stopped by emergency stop, can be restarted
 
 export interface TaskCreateRequest {
   vegetable_id: string;
@@ -60,11 +61,12 @@ export interface SystemStatus {
 }
 
 export interface SystemUpdate {
-  event: string;
+  type: string;              // "task_update" | "system_event" | "workflow_event" | "status"
+  event?: string;            // For workflow_event type
   task_id?: string;
   bay_id?: number;
   data?: Record<string, unknown>;
-  timestamp: string;
+  timestamp?: string | number;
 }
 
 export interface ApiError {
