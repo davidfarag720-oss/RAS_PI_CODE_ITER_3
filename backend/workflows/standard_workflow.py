@@ -250,7 +250,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
             try:
                 weight = await self.stm32.scale_read()
                 if weight is not None:
-                    self.total_weight_processed += weight
+                    self.total_weight_processed = weight
                     await self._emit_event(
                         WorkflowEvent.WEIGHT_UPDATE,
                         {"total_weight": self.total_weight_processed}
