@@ -124,6 +124,15 @@ async def lifespan(app: FastAPI):
             stm32_interface = None
             app.state.config_mismatch = True
 
+        # Mock override: replace real STM32 interface when STM32_MOCK=1
+        import os
+        if os.environ.get("STM32_MOCK") == "1":
+            from backend.comms.mock_stm32 import MockSTM32Interface
+            stm32_interface = MockSTM32Interface()
+            app.state.config_mismatch = False
+            logger.info("STM32_MOCK=1: using MockSTM32Interface (no serial port)")
+            print("[mock] STM32_MOCK=1 active — MockSTM32Interface loaded", flush=True)
+
         # Initialize camera
         camera_manager = CameraManager()
         logger.info("Camera initialized")
