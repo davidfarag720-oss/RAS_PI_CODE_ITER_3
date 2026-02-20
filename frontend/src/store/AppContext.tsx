@@ -55,13 +55,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, tasks: action.payload };
     case 'ADD_TASK':
       return { ...state, tasks: [...state.tasks, action.payload] };
-    case 'UPDATE_TASK':
+    case 'UPDATE_TASK': {
+      const exists = state.tasks.some((t) => t.id === action.payload.id);
       return {
         ...state,
-        tasks: state.tasks.map((t) =>
-          t.id === action.payload.id ? action.payload : t
-        ),
+        tasks: exists
+          ? state.tasks.map((t) => (t.id === action.payload.id ? action.payload : t))
+          : [...state.tasks, action.payload],
       };
+    }
     case 'REMOVE_TASK':
       return {
         ...state,
@@ -124,27 +126,52 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Handle real-time updates
-  const handleSystemUpdate = useCallback((update: { event: string; task_id?: string; data?: Record<string, unknown> }) => {
-    if (update.event === 'task_updated' && update.data) {
+  // Handle real-time updates from WebSocket
+  const handleSystemUpdate = useCallback((update: { type?: string; event?: string; task_id?: string; data?: Record<string, unknown> }) => {
+    // task_update messages from broadcast_task_update
+    if (update.type === 'task_update' && update.data) {
       dispatch({ type: 'UPDATE_TASK', payload: update.data as unknown as Task });
-    } else if (update.event === 'task_created' && update.data) {
-      dispatch({ type: 'ADD_TASK', payload: update.data as unknown as Task });
-    } else if (update.event === 'task_deleted' && update.task_id) {
-      dispatch({ type: 'REMOVE_TASK', payload: update.task_id });
     }
+    // system_event messages (emergency_stop, system_restarted)
+    else if (update.type === 'system_event' && update.data) {
+      // Refresh all data to pick up STOPPED task statuses
+      refreshData();
+      return; // refreshData already fetches system status
+    }
+
     // Refresh status on any update
     getSystemStatus().then((status) => {
       dispatch({ type: 'SET_SYSTEM_STATUS', payload: status });
     });
-  }, []);
+  }, [refreshData]);
 
-  useSystemUpdates(handleSystemUpdate);
+  const { isConnected } = useSystemUpdates(handleSystemUpdate);
 
   // Initial data load
   useEffect(() => {
     refreshData();
   }, [refreshData]);
+
+  // Background poll: keeps task list and status fresh even when WS events are missed
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const [tasks, status] = await Promise.all([getTasks(), getSystemStatus()]);
+        dispatch({ type: 'SET_TASKS', payload: tasks });
+        dispatch({ type: 'SET_SYSTEM_STATUS', payload: status });
+      } catch {
+        // silent — don't surface background poll failures to the user
+      }
+    }, 3000);
+    return () => clearInterval(id);
+  }, []); // empty deps: runs once for the lifetime of the provider
+
+  // Re-sync on every WebSocket connect/reconnect to catch events missed during downtime
+  useEffect(() => {
+    if (isConnected) {
+      refreshData();
+    }
+  }, [isConnected, refreshData]);
 
   const getVegetableName = useCallback(
     (id: string) => {
