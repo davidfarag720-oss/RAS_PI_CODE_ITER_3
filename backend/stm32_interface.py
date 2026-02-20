@@ -197,3 +197,35 @@ class STM32Interface:
         """Send emergency stop command."""
         response = await self._run_sync(self.comms.emergency_stop)
         self.logger.critical("EMERGENCY STOP sent")
+
+    # ========================================================================
+    # SCALE & VIBRATION
+    # ========================================================================
+
+    async def scale_tare(self) -> bool:
+        """Tare the scale. Returns True on success."""
+        return await self._run_sync(self.comms.scale_tare)
+
+    async def scale_read(self) -> Optional[float]:
+        """Read current scale weight in grams. Returns None on failure."""
+        return await self._run_sync(self.comms.scale_read)
+
+    async def vibration_all_off(self) -> None:
+        """Turn off all vibration motors."""
+        await self._run_sync(self.comms.vibration_all_off)
+
+    # ========================================================================
+    # SYSTEM RECOVERY
+    # ========================================================================
+
+    async def reset_system(self) -> None:
+        """Clear emergency stop flag (must call before home_actuators after e-stop)."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.comms.reset_system)
+
+    async def home_actuators(self) -> None:
+        """Run full boot sequence + clear cutter bay. Waits up to 45s."""
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, self.comms.cut_home)
+        if not success:
+            raise RuntimeError("Actuator home sequence failed")

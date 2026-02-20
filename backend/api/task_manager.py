@@ -87,6 +87,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    STOPPED = "stopped"  # stopped by emergency, can be re-queued via restart()
 
 
 @dataclass
@@ -152,7 +153,8 @@ class TaskManager:
     - Error handling
     """
     
-    def __init__(self, config, camera_manager, stm32_interface=None, workflow_event_callback=None):
+    def __init__(self, config, camera_manager, stm32_interface=None,
+                 workflow_event_callback=None, task_status_callback=None):
         """
         Initialize task manager.
 
@@ -161,12 +163,14 @@ class TaskManager:
             camera_manager: CameraManager instance
             stm32_interface: Optional STM32Interface instance (uses MockSTM32 if None)
             workflow_event_callback: Optional async callback for workflow events (event_name, event_data)
+            task_status_callback: Optional async callback for task status changes (task)
         """
         self.logger = logging.getLogger('TaskManager')
         self.config = config
         self.camera_manager = camera_manager
         self.stm32_interface = stm32_interface or MockSTM32Interface()
         self.workflow_event_callback = workflow_event_callback
+        self.task_status_callback = task_status_callback
 
         # Task storage
         self.tasks: Dict[str, Task] = {}  # task_id -> Task
@@ -179,6 +183,9 @@ class TaskManager:
         # Execution control
         self.running = False
         self.executor_task: Optional[asyncio.Task] = None
+
+        # Emergency stop recovery: IDs of tasks stopped by e-stop (can be restarted)
+        self.stopped_task_ids: List[str] = []
 
         # Start task executor
         self.start_executor()
@@ -309,10 +316,16 @@ class TaskManager:
                         self.task_queue.remove(task_id)
                 
                 if task_to_execute:
-                    # Execute task (will block until complete)
-                    # Store the task future for potential cancellation
-                    task_to_execute._task_future = asyncio.current_task()
-                    await self._execute_task(task_to_execute)
+                    # Fire-and-forget: _execute_task manages its own lifecycle
+                    # via active_bays. Do NOT await here — awaiting the task
+                    # future means CancelledError from emergency_stop propagates
+                    # up as BaseException and kills this executor loop.
+                    task_to_execute._task_future = asyncio.create_task(
+                        self._execute_task(task_to_execute)
+                    )
+                    # Yield once so _execute_task can start and add to active_bays
+                    # before the next loop iteration checks len(active_bays).
+                    await asyncio.sleep(0)
                 else:
                     # No tasks - wait before checking again
                     await asyncio.sleep(0.5)
@@ -338,7 +351,9 @@ class TaskManager:
             # Update task status
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.now()
-            
+            if self.task_status_callback:
+                await self.task_status_callback(task)
+
             self.logger.info(f"Starting task {task.id} on bay {task.bay_id}")
             
             # Import workflow class
@@ -359,6 +374,13 @@ class TaskManager:
                     task.items_rejected += 1
                 elif event_name == "weight_update":
                     task.weight_processed_grams = event_data.get("total_weight", 0.0)
+
+                # Broadcast task status update (stats changed)
+                if self.task_status_callback:
+                    try:
+                        await self.task_status_callback(task)
+                    except Exception as e:
+                        self.logger.error(f"Error in task status callback: {e}")
 
                 # Broadcast to WebSocket clients
                 if self.workflow_event_callback:
@@ -411,6 +433,13 @@ class TaskManager:
             self.reserved_bays.discard(task.bay_id)  # Bay now available
             task._workflow_instance = None
             task._task_future = None
+
+            # Broadcast final status (COMPLETED/CANCELLED/FAILED)
+            if self.task_status_callback:
+                try:
+                    await self.task_status_callback(task)
+                except Exception as e:
+                    self.logger.error(f"Error in task status callback (finally): {e}")
 
             self.logger.info(f"Bay {task.bay_id} released (hopper empty)")
     
@@ -523,17 +552,63 @@ class TaskManager:
             self.logger.info(f"Bay {task.bay_id} released (task force-cancelled)")
     
     async def emergency_stop(self):
-        """Emergency stop - cancel all tasks"""
+        """Emergency stop - halt all tasks and mark them STOPPED for restart."""
         self.logger.warning("EMERGENCY STOP initiated")
-        
-        # Cancel all tasks
+
+        self.stopped_task_ids.clear()
+
         for task_id in list(self.tasks.keys()):
             task = self.tasks[task_id]
             if task.status in [TaskStatus.QUEUED, TaskStatus.RUNNING]:
+                self.stopped_task_ids.append(task.id)
                 await self._cancel_task_internal(task)
-        
-        self.logger.warning("All tasks stopped")
+                # Override CANCELLED -> STOPPED so restart() can find these tasks
+                task.status = TaskStatus.STOPPED
+                # Re-reserve bay (_cancel_task_internal released it; STOPPED task still owns it)
+                self.reserved_bays.add(task.bay_id)
+                # Broadcast STOPPED status directly so frontend doesn't wait for a refresh
+                if self.task_status_callback:
+                    try:
+                        await self.task_status_callback(task)
+                    except Exception as e:
+                        self.logger.error(f"Error broadcasting STOPPED status: {e}")
+
+        self.logger.warning(f"All tasks stopped ({len(self.stopped_task_ids)} can be restarted)")
     
+    async def restart(self, stm32) -> int:
+        """
+        Clear emergency state and re-queue all STOPPED tasks.
+
+        Sequence: reset_system -> home_actuators (boot + bay clear) -> re-queue.
+
+        Args:
+            stm32: STM32Interface instance (or mock)
+
+        Returns:
+            Number of tasks re-queued
+        """
+        self.logger.info("RESTART: clearing emergency stop flag")
+        await stm32.reset_system()
+
+        self.logger.info("RESTART: homing actuators (~30s)...")
+        await stm32.home_actuators()
+
+        count = 0
+        for task_id in list(self.stopped_task_ids):
+            task = self.tasks.get(task_id)
+            if task and task.status == TaskStatus.STOPPED:
+                task.status = TaskStatus.QUEUED
+                task.started_at = None
+                task.completed_at = None
+                self.task_queue.append(task.id)
+                self.reserved_bays.add(task.bay_id)
+                count += 1
+                self.logger.info(f"RESTART: re-queued task {task.id} (bay {task.bay_id})")
+
+        self.stopped_task_ids.clear()
+        self.logger.info(f"RESTART complete: {count} tasks re-queued")
+        return count
+
     # ========================================================================
     # TASK QUERIES
     # ========================================================================
