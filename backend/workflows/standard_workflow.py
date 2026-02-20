@@ -136,8 +136,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
         # Tare the scale
         self.logger.info("Taring scale...")
         try:
-            # Scale operations are not in STM32Interface, call directly on comms
-            if not self.stm32.comms.scale_tare():
+            if not await self.stm32.scale_tare():
                 raise HardwareError("Failed to tare scale")
         except Exception as e:
             self.logger.warning(f"Scale tare failed: {e}")
@@ -249,7 +248,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
 
             # Step 5: Read scale for telemetry
             try:
-                weight = self.stm32.comms.scale_read()
+                weight = await self.stm32.scale_read()
                 if weight is not None:
                     self.total_weight_processed += weight
                     await self._emit_event(
@@ -328,13 +327,13 @@ class StandardVegetableWorkflow(BaseWorkflow):
 
         # Turn off all vibration (if it was enabled)
         try:
-            self.stm32.comms.vibration_all_off()
+            await self.stm32.vibration_all_off()
         except Exception as e:
             self.logger.warning(f"Failed to turn off vibration: {e}")
 
         # Read final weight
         try:
-            final_weight = self.stm32.comms.scale_read()
+            final_weight = await self.stm32.scale_read()
             if final_weight is not None:
                 self.logger.info(f"Total weight processed: {self.total_weight_processed:.1f}g")
         except Exception as e:
@@ -495,16 +494,6 @@ class StandardVegetableWorkflow(BaseWorkflow):
         # Don't prefetch if we're at or past target
         if next_item_num > self.target_count:
             self.logger.debug("Skipping prefetch - at target")
-            return
-
-        # Don't prefetch if bay is empty
-        try:
-            is_empty = await self.stm32.is_hopper_empty(self.bay_id)
-            if is_empty:
-                self.logger.debug("Skipping prefetch - bay empty")
-                return
-        except Exception as e:
-            self.logger.warning(f"Failed to check hopper status in prefetch: {e}")
             return
 
         # Cancel any existing prefetch task

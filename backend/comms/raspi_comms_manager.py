@@ -711,9 +711,9 @@ class STM32Interface:
             return True
         return False
     
-    def cut_home(self) -> bool:
-        """Home all cutter axes."""
-        resp = self.comms.send_command(CommandCode.CMD_CUT_HOME)
+    def cut_home(self, timeout: float = 45.0) -> bool:
+        """Home all cutter axes and clear bay. Blocks ~30s."""
+        resp = self.comms.send_command(CommandCode.CMD_CUT_HOME, timeout=timeout)
         return resp is not None and resp.status == ResponseStatus.RESP_OK
     
     def cut_abort(self) -> bool:

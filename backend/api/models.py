@@ -67,6 +67,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    STOPPED = "stopped"  # stopped by emergency, can be re-queued via restart()
 
 
 class TaskCreateRequest(BaseModel):

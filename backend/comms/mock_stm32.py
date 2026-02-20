@@ -15,7 +15,7 @@ Date: February 2026
 import asyncio
 import logging
 import time
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Optional
 
 logger = logging.getLogger('MockSTM32')
 
@@ -90,6 +90,13 @@ class MockSTM32Interface:
     async def emergency_stop(self) -> None:
         self._record("emergency_stop()", "HALT")
 
+    async def reset_system(self) -> None:
+        self._record("reset_system()", "OK")
+
+    async def home_actuators(self) -> None:
+        await self._prompt("[mock] home_actuators — press Enter when actuators are homed: ")
+        self._record("home_actuators()", "done")
+
     # ------------------------------------------------------------------ #
     # Feedback methods (operator input required)
     # ------------------------------------------------------------------ #
@@ -121,6 +128,20 @@ class MockSTM32Interface:
         result = raw.strip().lower() == "y"
         self._record(f"is_hopper_empty(hopper_id={hopper_id})", result)
         return result
+
+    async def scale_tare(self) -> bool:
+        self._record("scale_tare()", True)
+        return True
+
+    async def scale_read(self) -> Optional[float]:
+        raw = await self._prompt("[mock] scale_read — enter weight (grams, or blank to skip): ")
+        raw = raw.strip()
+        result = float(raw) if raw else None
+        self._record("scale_read()", result)
+        return result
+
+    async def vibration_all_off(self) -> None:
+        self._record("vibration_all_off()", "OK")
 
     # ------------------------------------------------------------------ #
     # Timing report
