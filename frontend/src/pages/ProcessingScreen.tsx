@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '../components/common';
 import { CameraFeed, WeightDisplay, TaskQueue, EmergencyStop } from '../components/processing';
@@ -7,17 +7,23 @@ import { useApp } from '../store/AppContext';
 export function ProcessingScreen() {
   const navigate = useNavigate();
   const { state, getVegetableName, getCutTypeName, refreshData } = useApp();
+  const [isSystemStopped, setIsSystemStopped] = useState(false);
 
   // Find the active (running) task
   const activeTask = useMemo(() => {
     return state.tasks.find((t) => t.status === 'running');
   }, [state.tasks]);
 
-  // Get all non-completed tasks for the queue
+  // Get all non-completed tasks for the queue (includes stopped tasks)
   const queuedTasks = useMemo(() => {
     return state.tasks.filter((t) =>
-      t.status === 'running' || t.status === 'queued' || t.status === 'paused'
+      t.status === 'running' || t.status === 'queued' || t.status === 'paused' || t.status === 'stopped'
     );
+  }, [state.tasks]);
+
+  // Derive stopped state from tasks (survives page refresh)
+  const hasStoppedTasks = useMemo(() => {
+    return state.tasks.some((t) => t.status === 'stopped');
   }, [state.tasks]);
 
   // Build lookup maps for names
@@ -46,6 +52,12 @@ export function ProcessingScreen() {
   };
 
   const handleEmergencyStop = () => {
+    setIsSystemStopped(true);
+    refreshData();
+  };
+
+  const handleRestart = () => {
+    setIsSystemStopped(false);
     refreshData();
   };
 
@@ -93,7 +105,11 @@ export function ProcessingScreen() {
             itemCount={displayItemCount}
             vegetableName={displayVegetable}
           />
-          <EmergencyStop onStop={handleEmergencyStop} />
+          <EmergencyStop
+            onStop={handleEmergencyStop}
+            onRestart={handleRestart}
+            isStopped={isSystemStopped || hasStoppedTasks}
+          />
         </div>
 
         {/* Task queue */}
