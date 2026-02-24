@@ -29,7 +29,10 @@ from enum import IntEnum
 class ProtocolConstants:
     """Protocol constants for 5-byte packet structure"""
     PACKET_SIZE = 5
-    
+
+    # Unsolicited event status codes (STM32 -> RasPi, not responses to commands)
+    EVENT_GATE_AT_POSITION_C = 0x10  # Gate servo reached Position C; DATA_L = gate_id
+
     # Start bytes
     START_BYTE_RX = 0xA5  # STM32 sends this
     START_BYTE_TX = 0x5A  # RasPi sends this
@@ -148,6 +151,10 @@ class RaspiCommsManager:
         self.response_lock = threading.Lock()
         self.last_response: Optional[Response] = None
         self.response_callbacks: Dict[int, Callable[[Response], None]] = {}
+
+        # Event signaled when STM32 sends EVENT_GATE_AT_POSITION_C notification
+        self._gate_at_c_event = threading.Event()
+        self._gate_at_c_gate_id: int = 0  # Which gate triggered the event
         
         # Statistics
         self.stats = {
@@ -363,24 +370,34 @@ class RaspiCommsManager:
             self.stats['checksum_errors'] += 1
             return
         
+        # Detect unsolicited events BEFORE constructing Response (prevents enum ValueError)
+        if status == ProtocolConstants.EVENT_GATE_AT_POSITION_C:
+            self._gate_at_c_gate_id = data_l  # DATA_L contains gate_id
+            self._gate_at_c_event.set()
+            self.logger.info(f"EVENT: Gate at Position C (gate_id={data_l})")
+            # Do NOT store as last_response — this is an unsolicited event,
+            # not a response to any pending command. Still call registered callbacks.
+            self.stats['rx_count'] += 1
+            return
+
         # Combine data bytes into 16-bit value
         data = (data_h << 8) | data_l
-        
-        # Create response object
+
+        # Create response object (only for command responses, not unsolicited events)
         response = Response(
             status=ResponseStatus(status),
             data=data,
             raw_packet=packet,
             timestamp=time.time()
         )
-        
+
         self.stats['rx_count'] += 1
         self.logger.debug(f"RX: STATUS=0x{status:02X} DATA={data}")
-        
-        # Store response
+
+        # Only store as last_response if it's a command response (not an unsolicited event)
         with self.response_lock:
             self.last_response = response
-        
+
         # Call registered callbacks
         for callback in self.response_callbacks.values():
             try:
@@ -404,6 +421,47 @@ class RaspiCommsManager:
     def is_connected(self) -> bool:
         """Check if serial connection is active."""
         return self.serial is not None and self.serial.is_open and self.running
+
+    def wait_for_gate_at_position_c(self, gate_id: int = 1, timeout: float = 5.0) -> bool:
+        """
+        Block until STM32 sends EVENT_GATE_AT_POSITION_C for the given gate,
+        or timeout elapses.
+
+        Must be called AFTER sending CMD_LOAD_CUTTER (the STM32 fires the event
+        when its FSM enters GATE_AT_POSITION_C during the load-cutter sequence).
+
+        The event latch should be cleared BEFORE sending CMD_LOAD_CUTTER to avoid
+        a race where the STM32 fires the event before this wait starts. See
+        STM32Interface.load_cutter() for the correct ordering.
+
+        Args:
+            gate_id: Expected gate ID in the event (default 1 = CUTTER_TOP_ID)
+            timeout: Maximum wait in seconds (default 5.0)
+
+        Returns:
+            True if event received for the expected gate within timeout
+            False if timeout elapsed (caller should warn and proceed with caution)
+        """
+        # Wait for the event to be set by _process_packet()
+        received = self._gate_at_c_event.wait(timeout=timeout)
+
+        if received:
+            if self._gate_at_c_gate_id == gate_id:
+                self.logger.info(f"Gate {gate_id} confirmed at Position C")
+                return True
+            else:
+                # Different gate fired — unexpected, treat as timeout
+                self.logger.warning(
+                    f"Gate-at-C event for gate {self._gate_at_c_gate_id}, "
+                    f"expected gate {gate_id}"
+                )
+                return False
+        else:
+            self.logger.warning(
+                f"Timeout waiting for gate {gate_id} at Position C "
+                f"({timeout}s elapsed)"
+            )
+            return False
 
     # ========================================================================
     # HIGH-LEVEL COMMAND METHODS
