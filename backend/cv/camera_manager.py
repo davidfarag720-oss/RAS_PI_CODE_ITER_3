@@ -9,6 +9,7 @@ Date: January 2026
 """
 
 import asyncio
+import os
 import cv2
 import numpy as np
 from typing import Dict, Optional
@@ -199,8 +200,10 @@ class CameraManager:
                 'vegetable_id': vegetable_config.id
             }
 
-        # 4. In mock mode (no camera), prompt operator for the CV decision
-        if self.camera is None:
+        # 4. In mock mode (STM32_MOCK=1), prompt operator for the CV decision.
+        # Note: self.camera may be non-None even in mock mode (real webcam present or
+        # VideoCapture(0) succeeds on Windows), so we check STM32_MOCK env var instead.
+        if os.environ.get('STM32_MOCK') == '1':
             raw = await asyncio.get_event_loop().run_in_executor(
                 None,
                 input,
