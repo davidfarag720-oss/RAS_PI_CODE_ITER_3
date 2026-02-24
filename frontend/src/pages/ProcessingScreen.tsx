@@ -3,10 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '../components/common';
 import { CameraFeed, WeightDisplay, TaskQueue, EmergencyStop } from '../components/processing';
 import { useApp } from '../store/AppContext';
+import { cancelTask, stopTask } from '../api';
 
 export function ProcessingScreen() {
   const navigate = useNavigate();
-  const { state, getVegetableName, getCutTypeName, refreshData } = useApp();
+  const { state, dispatch, getVegetableName, getCutTypeName, refreshData } = useApp();
   const [isSystemStopped, setIsSystemStopped] = useState(false);
 
   // Find the active (running) task
@@ -14,10 +15,14 @@ export function ProcessingScreen() {
     return state.tasks.find((t) => t.status === 'running');
   }, [state.tasks]);
 
-  // Get all non-completed tasks for the queue (includes stopped tasks)
+  // Get tasks for the queue view: active, queued, and completed (so operators can review and dismiss)
   const queuedTasks = useMemo(() => {
     return state.tasks.filter((t) =>
-      t.status === 'running' || t.status === 'queued' || t.status === 'paused' || t.status === 'stopped'
+      t.status === 'running' ||
+      t.status === 'queued' ||
+      t.status === 'paused' ||
+      t.status === 'stopped' ||
+      t.status === 'completed'
     );
   }, [state.tasks]);
 
@@ -59,6 +64,28 @@ export function ProcessingScreen() {
   const handleRestart = () => {
     setIsSystemStopped(false);
     refreshData();
+  };
+
+  const handleCancelQueued = async (taskId: string) => {
+    try {
+      await cancelTask(taskId);
+      dispatch({ type: 'REMOVE_TASK', payload: taskId });
+    } catch (e) {
+      console.error('Failed to cancel task', e);
+    }
+  };
+
+  const handleStopActive = async (taskId: string) => {
+    try {
+      await stopTask(taskId);
+      // No immediate state change — task will update via WebSocket when it completes
+    } catch (e) {
+      console.error('Failed to request graceful stop', e);
+    }
+  };
+
+  const handleDismissCompleted = (taskId: string) => {
+    dispatch({ type: 'DISMISS_TASK', payload: taskId });
   };
 
   // Display info
@@ -122,6 +149,9 @@ export function ProcessingScreen() {
               tasks={queuedTasks}
               vegetables={vegetableNames}
               cutTypes={cutTypeNames}
+              onCancelQueued={handleCancelQueued}
+              onStopActive={handleStopActive}
+              onDismissCompleted={handleDismissCompleted}
             />
           </div>
         )}
