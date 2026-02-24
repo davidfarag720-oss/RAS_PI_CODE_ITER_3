@@ -81,6 +81,7 @@ class BaseWorkflow(ABC):
         self.state = WorkflowState.IDLE
         self._stop_requested = False
         self._pause_requested = False
+        self._stop_after_current = False
         
         # Metrics
         self.total_items = 0
@@ -128,11 +129,15 @@ class BaseWorkflow(ABC):
                 if self._stop_requested:
                     self.logger.info("Stop requested")
                     break
-                
+
+                if self._stop_after_current:
+                    self.logger.info("Graceful stop: stopping after current item completed")
+                    break
+
                 if self._pause_requested:
                     await self._handle_pause()
                     continue
-                
+
                 # Process single item
                 try:
                     success = await self.process_single_item()
@@ -205,7 +210,17 @@ class BaseWorkflow(ABC):
         self._stop_requested = True
         self.logger.info("Stop requested")
         await self._emit_event(WorkflowEvent.STOPPED)
-    
+
+    async def stop_after_current(self):
+        """Request workflow stop after current item completes (graceful stop).
+
+        Unlike stop(), this does NOT interrupt the current item.
+        The workflow finishes process_single_item() and then checks the flag
+        at the top of the main loop before starting the next item.
+        """
+        self._stop_after_current = True
+        self.logger.info("Graceful stop requested — will stop after current item")
+
     async def emergency_stop(self):
         """Emergency stop all operations."""
         self.logger.warning("Emergency stop activated")
