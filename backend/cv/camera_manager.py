@@ -8,6 +8,7 @@ Author: Ficio Prep Team
 Date: January 2026
 """
 
+import asyncio
 import cv2
 import numpy as np
 from typing import Dict, Optional
@@ -135,6 +136,12 @@ class CameraManager:
         
         return str(filepath)
     
+    # ROOT CAUSE (v1.0 bug — Phase 7 fix):
+    # _run_yolo_detection and _run_efficientnet_classification both returned
+    # healthy=True unconditionally (hardcoded placeholder values). Combined with
+    # _ensure_models_loaded() being commented out, no real models were ever loaded.
+    # Result: every vegetable was accepted and routed to load_cutter regardless of
+    # actual quality. Fix: replace hardcoded values with operator prompt in mock mode.
     async def analyze_vegetable(
         self,
         vegetable_config: VegetableConfig,
@@ -142,14 +149,14 @@ class CameraManager:
     ) -> Dict:
         """
         Run CV analysis on a staged vegetable.
-        
+
         Uses ensemble of YOLO (object detection) and EfficientNet (classification)
         to determine if vegetable is healthy and properly positioned.
-        
+
         Args:
             vegetable_config: Configuration for the vegetable being analyzed
             bay_id: Bay number (for logging/telemetry)
-        
+
         Returns:
             Dictionary with keys:
                 - accepted: bool (True if vegetable passes quality check)
@@ -159,30 +166,80 @@ class CameraManager:
                 - reason: str (rejection reason if not accepted)
                 - models_agree: bool (True if both models agree)
                 - image_path: str (path to saved image)
+                - bay_id: int (bay number)
+                - vegetable_id: str (vegetable identifier)
         """
         self.logger.info(
             f"Analyzing {vegetable_config.name} from bay {bay_id} "
             f"in {self.config.get_str('cv_grading_mode')} mode..."
         )
-        
-        # Capture frame
+
+        # 1. Capture frame
         frame = self.capture_frame()
-        
-        # Save for telemetry
+
+        # 2. Save for telemetry (always runs, even when CV is disabled)
         image_path = self.save_frame(
             frame,
             prefix=f"bay{bay_id}_{vegetable_config.id}_analysis"
         )
-        
+
+        # 3. Check cv_check_enabled — if False, accept unconditionally (image still saved above)
+        cv_enabled = self.config.get_bool('cv_check_enabled', True)
+        if not cv_enabled:
+            self.logger.info("CV check disabled (cv_check_enabled=false) — forcing accepted=True")
+            return {
+                'accepted': True,
+                'confidence': 1.0,
+                'healthy': True,
+                'positioned': True,
+                'reason': None,
+                'models_agree': True,
+                'image_path': image_path,
+                'bay_id': bay_id,
+                'vegetable_id': vegetable_config.id
+            }
+
+        # 4. In mock mode (no camera), prompt operator for the CV decision
+        if self.camera is None:
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None,
+                input,
+                f"[cv-mock] bay{bay_id} {vegetable_config.name} — Accept or reject this vegetable? [a/r]: "
+            )
+            mock_healthy = raw.strip().lower() == 'a'
+            mock_confidence = 0.90 if mock_healthy else 0.10
+            self.logger.info(
+                f"[cv-mock] Operator decision: {'ACCEPT' if mock_healthy else 'REJECT'}"
+            )
+            # Build result directly from operator input — skip model stubs
+            grading_mode = self.config.get_str('cv_grading_mode', 'harsh')
+            result = self._apply_decision_logic(
+                {
+                    'detected': True,
+                    'label': f"{'healthy' if mock_healthy else 'unhealthy'}_{vegetable_config.id}",
+                    'healthy': mock_healthy,
+                    'confidence': mock_confidence,
+                    'bbox': (0, 0, 0, 0),
+                    'positioned': True
+                },
+                {'healthy': mock_healthy, 'confidence': mock_confidence},
+                grading_mode
+            )
+            result['image_path'] = image_path
+            result['bay_id'] = bay_id
+            result['vegetable_id'] = vegetable_config.id
+            return result
+
+        # 5. Real camera path — run model stubs (TODO: implement actual inference)
         # TODO: Load actual models if not already loaded
         # self._ensure_models_loaded(vegetable_config)
-        
+
         # Run YOLO detection
         yolo_result = self._run_yolo_detection(frame, vegetable_config)
-        
+
         # Run EfficientNet classification
         efficientnet_result = self._run_efficientnet_classification(frame, vegetable_config)
-        
+
         # Apply decision logic
         grading_mode = self.config.get_str('cv_grading_mode', 'harsh')
         result = self._apply_decision_logic(
@@ -190,11 +247,11 @@ class CameraManager:
             efficientnet_result,
             grading_mode
         )
-        
+
         result['image_path'] = image_path
         result['bay_id'] = bay_id
         result['vegetable_id'] = vegetable_config.id
-        
+
         return result
     
     def _ensure_models_loaded(self, vegetable_config: VegetableConfig):
