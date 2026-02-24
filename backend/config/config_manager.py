@@ -295,13 +295,13 @@ class ConfigManager:
         """
         # Check required system settings
         required_settings = [
-            'num_bays', 'num_cameras', 'cv_grading_mode',
+            'num_cameras', 'cv_grading_mode',
             'serial_port', 'serial_baudrate'
         ]
         for setting in required_settings:
             if setting not in self.system_settings:
                 raise ValueError(f"Missing required system setting: {setting}")
-        
+
         # Check vegetables have valid cut types
         for veg in self.vegetables.values():
             for cut_name in veg.supported_cuts:
@@ -309,11 +309,6 @@ class ConfigManager:
                     raise ValueError(
                         f"Vegetable '{veg.id}' references unknown cut type: {cut_name}"
                     )
-        
-        # Check bay count
-        num_bays = self.get_int('num_bays')
-        if num_bays < 1 or num_bays > 4:
-            raise ValueError(f"Invalid num_bays: {num_bays} (must be 1-4)")
         
         self.logger.info("✓ Configuration validated successfully")
         return True

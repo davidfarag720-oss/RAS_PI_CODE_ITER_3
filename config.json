@@ -1,6 +1,5 @@
 {
   "system_settings": {
-    "num_bays": 4,
     "num_cameras": 1,
     "cv_grading_mode": "harsh",
     "install_path": "/home/dfarag/RAS_PI_CODE_ITER_3",
