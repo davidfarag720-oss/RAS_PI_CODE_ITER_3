@@ -484,18 +484,42 @@ async def get_task(task_id: str):
 async def cancel_task(task_id: str):
     """
     Cancel a task (if queued or active).
-    
+
     Args:
         task_id: Task UUID
     """
     success = await task_manager.cancel_task(task_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found or cannot be cancelled")
-    
+
     # Notify WebSocket clients
     task = task_manager.get_task(task_id)
     if task:
         await broadcast_task_update(task)
+
+
+@app.post("/api/tasks/{task_id}/stop", status_code=204)
+async def stop_task_gracefully(task_id: str):
+    """
+    Gracefully stop an active task after the current veggie cycle completes.
+
+    The workflow finishes the current item (dispense + CV + cut + gate return)
+    and then stops processing. Task transitions to COMPLETED status.
+
+    Use DELETE /api/tasks/{task_id} to cancel a QUEUED task immediately.
+
+    Args:
+        task_id: Task UUID
+
+    Raises:
+        HTTPException 404: Task not found or not in RUNNING state
+    """
+    success = await task_manager.graceful_stop_task(task_id)
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task '{task_id}' not found or not currently running (use DELETE for queued tasks)"
+        )
 
 
 # ============================================================================

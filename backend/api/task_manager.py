@@ -58,8 +58,8 @@ class MockSTM32Interface:
         self.logger.debug(f"Mock: Dispose via gate {gate_id}")
 
     async def load_cutter(self, gate_id: int = 1, wait_for_cutter_idle: bool = True) -> None:
-        self.logger.debug(f"Mock: Load cutter via gate {gate_id}")
-        await asyncio.sleep(0.1)
+        self.logger.debug(f"Mock: Load cutter via gate {gate_id} (simulating 1.5s travel)")
+        await asyncio.sleep(1.5)  # Simulate blocking until the gate reaches Position C
 
     async def cut(self, axis_bitmask: int) -> None:
         self.logger.debug(f"Mock: Cut with bitmask {axis_bitmask:03b}")
@@ -506,6 +506,38 @@ class TaskManager:
         await self._cancel_task_internal(task)
         return True
     
+    async def graceful_stop_task(self, task_id: str) -> bool:
+        """
+        Gracefully stop an active task after the current veggie cycle completes.
+
+        Unlike cancel_task(), this does NOT interrupt the current item.
+        The workflow finishes its current process_single_item() call and then
+        stops at the next loop iteration. Task transitions to COMPLETED.
+
+        Only valid for RUNNING tasks. For QUEUED tasks, use cancel_task() instead.
+
+        Args:
+            task_id: Task UUID
+
+        Returns:
+            True if graceful stop requested, False if task not found or not running
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
+
+        if task.status != TaskStatus.RUNNING:
+            return False
+
+        if task._workflow_instance and hasattr(task._workflow_instance, 'stop_after_current'):
+            try:
+                await task._workflow_instance.stop_after_current()
+            except Exception as e:
+                self.logger.warning(f"Error requesting graceful stop: {e}")
+
+        self.logger.info(f"Graceful stop requested for task {task_id}")
+        return True
+
     async def _cancel_task_internal(self, task: Task):
         """
         Internal cancellation logic.
