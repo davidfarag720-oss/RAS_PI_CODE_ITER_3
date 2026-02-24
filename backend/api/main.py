@@ -650,8 +650,8 @@ async def websocket_camera_feed(websocket: WebSocket):
                 continue
 
             try:
-                # Capture frame
-                frame = camera_manager.capture_frame()
+                # Capture stream frame (lower resolution, FPS-capped)
+                frame = camera_manager.capture_stream_frame()
 
                 # Encode as JPEG
                 _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])

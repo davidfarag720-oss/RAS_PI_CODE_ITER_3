@@ -9,6 +9,9 @@
     "camera_index": 0,
     "camera_width": 1920,
     "camera_height": 1080,
+    "stream_width": 1280,
+    "stream_height": 720,
+    "stream_fps": 30,
     "cv_confidence_threshold": 0.7,
     "staging_delay": 0.3,
     "gate_delay": 0.2,
@@ -18,11 +21,11 @@
   },
   "machine_variant": {
     "active_variant": "mini",
-    "num_hoppers": 1,
+    "num_hoppers": 3,
     "num_actuators": 1,
     "bottom_gate_present": false,
     "parallelization_enabled": false,
-    "num_vibration_motors": 1
+    "num_vibration_motors": 3
   },
   "vegetables": [
     {

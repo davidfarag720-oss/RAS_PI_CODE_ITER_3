@@ -44,7 +44,10 @@ class CameraManager:
         self.camera_index = camera_index
         self.width = self.config.get_int('camera_width', 1920)
         self.height = self.config.get_int('camera_height', 1080)
-        
+        self.stream_width = self.config.get_int('stream_width', 1280)
+        self.stream_height = self.config.get_int('stream_height', 720)
+        self.stream_fps = self.config.get_int('stream_fps', 30)
+
         # Initialize camera
         self.camera = None
         self._init_camera()
@@ -60,9 +63,10 @@ class CameraManager:
         
         self.logger.info(
             f"Camera initialized: index={self.camera_index}, "
-            f"resolution={self.width}x{self.height}"
+            f"resolution={self.width}x{self.height}, "
+            f"stream={self.stream_width}x{self.stream_height}@{self.stream_fps}fps"
         )
-    
+
     def _init_camera(self):
         """Initialize OpenCV camera"""
         try:
@@ -73,9 +77,10 @@ class CameraManager:
                 self.camera = None
                 return
 
-            # Set resolution
+            # Set resolution and FPS
             self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.camera.set(cv2.CAP_PROP_FPS, self.stream_fps)
 
             # Verify settings
             actual_width = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)
@@ -92,7 +97,23 @@ class CameraManager:
         except Exception as e:
             self.logger.warning(f"Failed to initialize camera: {e} - running in mock mode")
             self.camera = None
-    
+
+    def capture_stream_frame(self) -> np.ndarray:
+        """
+        Capture a frame for live streaming at the configured stream resolution.
+
+        Captures from the main camera and resizes to stream_width x stream_height.
+        MSMF/V4L2 only allow one VideoCapture per device, so a separate handle
+        is not used.
+
+        Returns:
+            NumPy array (BGR) at stream_width x stream_height
+        """
+        frame = self.capture_frame()
+        if frame.shape[1] != self.stream_width or frame.shape[0] != self.stream_height:
+            frame = cv2.resize(frame, (self.stream_width, self.stream_height))
+        return frame
+
     def capture_frame(self) -> np.ndarray:
         """
         Capture a single frame from the camera.
