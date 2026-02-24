@@ -91,18 +91,33 @@ class STM32Interface:
 
     async def load_cutter(self, gate_id: int = 1, wait_for_cutter_idle: bool = True) -> None:
         """
-        Execute load-cutter sequence.
+        Execute load-cutter sequence and wait for hardware confirmation that the gate
+        has reached Position C before returning.
+
+        Sequence:
+          1. (optional) Poll cutter until idle — prevents parallel-mode overlap
+          2. Clear the gate-at-C event latch (prevent stale event race)
+          3. Send CMD_LOAD_CUTTER
+          4. Wait up to 5s for EVENT_GATE_AT_POSITION_C notification from STM32
+             - If received: return normally (gate confirmed loaded)
+             - If timeout: log warning and return (proceed with caution; STM32 may still be moving)
 
         Args:
             gate_id: Gate ID (1=top, 2=bottom)
             wait_for_cutter_idle: If True, polls cutter status until idle before sending
 
         Raises:
-            RuntimeError: If command fails or cutter busy (parallel mode interlock)
+            RuntimeError: If CMD_LOAD_CUTTER itself fails (RESP_BUSY or unexpected status)
         """
         if wait_for_cutter_idle:
             await self.wait_for_cutter_idle(timeout=30.0)
 
+        # Step 1: Clear event latch BEFORE sending command to avoid race condition
+        # (STM32 could theoretically fire the event very quickly after CMD_LOAD_CUTTER)
+        self.comms._gate_at_c_event.clear()
+        self.comms._gate_at_c_gate_id = 0
+
+        # Step 2: Send CMD_LOAD_CUTTER
         response = await self._run_sync(self.comms.load_cutter, gate_id)
 
         if response.status == ResponseStatus.RESP_BUSY:
@@ -110,7 +125,23 @@ class STM32Interface:
         elif response.status != ResponseStatus.RESP_OK:
             raise RuntimeError(f"Load-cutter failed: {response.status}")
 
-        self.logger.info(f"Load-cutter sequence complete (gate {gate_id})")
+        # Step 3: Wait for STM32 to confirm gate reached Position C
+        # Timeout: 5s (servo travel takes ~0.5-1.5s in practice; 5s allows margin for jam detection)
+        gate_confirmed = await self._run_sync(
+            self.comms.wait_for_gate_at_position_c, gate_id, 5.0
+        )
+
+        if gate_confirmed:
+            self.logger.info(f"Load-cutter confirmed: gate {gate_id} at Position C")
+        else:
+            # Timeout or wrong gate — log warning but do NOT raise.
+            # The gate may still be in transit (servo slower than expected) or
+            # notification was lost. Proceeding allows the cut to attempt;
+            # the STM32's own interlocks remain active.
+            self.logger.warning(
+                f"load_cutter: No gate-at-Position-C confirmation for gate {gate_id} "
+                f"within 5s — proceeding with caution (gate may still be moving)"
+            )
 
     async def cut(self, axis_bitmask: int) -> None:
         """Execute cutting cycle and wait for completion."""
