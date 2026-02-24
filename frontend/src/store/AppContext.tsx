@@ -30,6 +30,7 @@ type AppAction =
   | { type: 'ADD_TASK'; payload: Task }
   | { type: 'UPDATE_TASK'; payload: Task }
   | { type: 'REMOVE_TASK'; payload: string }
+  | { type: 'DISMISS_TASK'; payload: string }  // client-side dismiss of completed task
   | { type: 'SET_SYSTEM_STATUS'; payload: SystemStatus }
   | { type: 'SET_MACHINE_CONFIG'; payload: MachineConfig }
   | { type: 'SET_LOADING'; payload: boolean }
@@ -65,6 +66,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
     case 'REMOVE_TASK':
+      return {
+        ...state,
+        tasks: state.tasks.filter((t) => t.id !== action.payload),
+      };
+    case 'DISMISS_TASK':
       return {
         ...state,
         tasks: state.tasks.filter((t) => t.id !== action.payload),

@@ -24,3 +24,7 @@ export async function pauseTask(id: string): Promise<Task> {
 export async function resumeTask(id: string): Promise<Task> {
   return post<Task>(`/tasks/${id}/resume`);
 }
+
+export async function stopTask(id: string): Promise<void> {
+  await post<void>(`/tasks/${id}/stop`);
+}
