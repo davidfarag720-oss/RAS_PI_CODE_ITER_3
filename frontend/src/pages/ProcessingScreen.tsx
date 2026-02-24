@@ -84,8 +84,13 @@ export function ProcessingScreen() {
     }
   };
 
-  const handleDismissCompleted = (taskId: string) => {
-    dispatch({ type: 'DISMISS_TASK', payload: taskId });
+  const handleDismissCompleted = async (taskId: string) => {
+    dispatch({ type: 'DISMISS_TASK', payload: taskId }); // optimistic — hide immediately
+    try {
+      await cancelTask(taskId); // DELETE /api/tasks/{id} — removes from backend
+    } catch {
+      // silent — task already hidden locally; backend will clean up on restart if needed
+    }
   };
 
   // Display info

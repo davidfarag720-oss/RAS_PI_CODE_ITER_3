@@ -500,6 +500,11 @@ class TaskManager:
         if not task:
             return False
         
+        TERMINAL = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.STOPPED}
+        if task.status in TERMINAL:
+            del self.tasks[task_id]
+            return True
+
         if task.status not in [TaskStatus.QUEUED, TaskStatus.RUNNING]:
             return False
         
