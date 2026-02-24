@@ -238,7 +238,16 @@ class ConfigManager:
         """Get system setting as string"""
         value = self.get(key, default)
         return str(value) if value is not None else default
-    
+
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        """Get system setting as boolean"""
+        value = self.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes')
+        return bool(value) if value is not None else default
+
     # ========================================================================
     # HARDWARE MAPPINGS
     # ========================================================================
