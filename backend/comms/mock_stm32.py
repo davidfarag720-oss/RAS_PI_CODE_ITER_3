@@ -82,6 +82,9 @@ class MockSTM32Interface:
     async def load_cutter(self, gate_id: int = 1, wait_for_cutter_idle: bool = True) -> None:
         if wait_for_cutter_idle:
             await self.wait_for_cutter_idle()
+            
+        await self._prompt(f"[mock] load_cutter(gate_id={gate_id}) — press Enter when gate reaches Position C: ")
+        
         self._record(f"load_cutter(gate_id={gate_id})", "OK")
 
     async def cut(self, axis_bitmask: int) -> None:

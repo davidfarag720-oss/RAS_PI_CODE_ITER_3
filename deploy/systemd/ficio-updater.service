@@ -1,0 +1,12 @@
+[Unit]
+Description=Ficio Auto-Updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/home/pi/vegetable-slicer/deploy/ficio-updater.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ficio-updater

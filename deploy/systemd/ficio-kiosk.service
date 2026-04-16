@@ -1,0 +1,29 @@
+[Unit]
+Description=Ficio Kiosk (Chromium)
+After=ficio-api.service graphical.target
+Requires=ficio-api.service
+ConditionPathExists=/usr/bin/chromium-browser
+
+[Service]
+Type=simple
+User=pi
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf http://localhost:8000/health && exit 0; sleep 2; done; echo "API health check failed after 60s" >&2; exit 1'
+ExecStart=/usr/bin/chromium-browser \
+  --kiosk \
+  --noerrdialogs \
+  --disable-infobars \
+  --disable-session-crashed-bubble \
+  --disable-component-update \
+  --check-for-update-interval=31536000 \
+  http://localhost:8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ficio-kiosk
+
+[Install]
+WantedBy=graphical.target
