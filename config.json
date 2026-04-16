@@ -20,54 +20,13 @@
   },
   "machine_variant": {
     "active_variant": "mini",
-    "num_hoppers": 3,
+    "num_hoppers": 1,
     "num_actuators": 1,
     "bottom_gate_present": false,
     "parallelization_enabled": false,
-    "num_vibration_motors": 3
+    "num_vibration_motors": 1
   },
   "vegetables": [
-    {
-      "name": "Cucumber",
-      "id": "cucumber",
-      "image_path": "assets/ui/cucumber.jpg",
-      "cv_models": {
-        "yolo_weights": "cucumber_yolo.pt",
-        "efficientnet_weights": "cucumber_efficientnet.pth"
-      },
-      "supported_cuts": [
-        "sliced",
-        "cubed"
-      ]
-    },
-    {
-      "name": "Carrot",
-      "id": "carrot",
-      "image_path": "assets/ui/carrot.jpg",
-      "cv_models": {
-        "yolo_weights": "carrot_yolo.pt",
-        "efficientnet_weights": "carrot_efficientnet.pth"
-      },
-      "supported_cuts": [
-        "long_fry",
-        "short_fry",
-        "sliced",
-        "cubed"
-      ]
-    },
-    {
-      "name": "Tomato",
-      "id": "tomato",
-      "image_path": "assets/ui/tomato.jpg",
-      "cv_models": {
-        "yolo_weights": "tomato_yolo.pt",
-        "efficientnet_weights": "tomato_efficientnet.pth"
-      },
-      "supported_cuts": [
-        "sliced",
-        "cubed"
-      ]
-    },
     {
       "name": "Potato",
       "id": "potato",
@@ -77,9 +36,7 @@
         "efficientnet_weights": "potato_efficientnet.pth"
       },
       "supported_cuts": [
-        "long_fry",
-        "short_fry",
-        "cubed"
+        "long_fry"
       ]
     }
   ],
@@ -89,30 +46,6 @@
       "display_name": "Long Fry",
       "axis_bitmask": 3,
       "description": "Longitudinal sticks"
-    },
-    "short_fry": {
-      "name": "short_fry",
-      "display_name": "Short Fry",
-      "axis_bitmask": 5,
-      "description": "Short sticks"
-    },
-    "sliced": {
-      "name": "sliced",
-      "display_name": "Sliced",
-      "axis_bitmask": 4,
-      "description": "Round/flat slices"
-    },
-    "long_slice": {
-      "name": "long_slice",
-      "display_name": "Long Slice",
-      "axis_bitmask": 1,
-      "description": "Lengthwise slices"
-    },
-    "cubed": {
-      "name": "cubed",
-      "display_name": "Cubed",
-      "axis_bitmask": 7,
-      "description": "Cubes/dice"
     }
   }
 }
