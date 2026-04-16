@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '../components/common';
 import { CameraFeed, WeightDisplay, TaskQueue, EmergencyStop } from '../components/processing';
 import { useApp } from '../store/AppContext';
-import { cancelTask, stopTask } from '../api';
+import { cancelTask, stopTask, powerOff } from '../api';
 
 export function ProcessingScreen() {
   const navigate = useNavigate();
   const { state, dispatch, getVegetableName, getCutTypeName, refreshData } = useApp();
   const [isSystemStopped, setIsSystemStopped] = useState(false);
+  const [showPowerOffConfirm, setShowPowerOffConfirm] = useState(false);
+  const [isPoweringOff, setIsPoweringOff] = useState(false);
 
   // Find the active (running) task
   const activeTask = useMemo(() => {
@@ -84,6 +86,19 @@ export function ProcessingScreen() {
     }
   };
 
+  const handlePowerOff = async () => {
+    setShowPowerOffConfirm(false);
+    setIsPoweringOff(true);
+    try {
+      await powerOff();
+      dispatch({ type: 'SET_SYSTEM_INITIALIZED', payload: false });
+      navigate('/');
+    } catch (e) {
+      console.error('Power off failed', e);
+      setIsPoweringOff(false);
+    }
+  };
+
   const handleDismissCompleted = async (taskId: string) => {
     dispatch({ type: 'DISMISS_TASK', payload: taskId }); // optimistic — hide immediately
     try {
@@ -113,13 +128,53 @@ export function ProcessingScreen() {
             'Processing'
           )}
         </div>
-        {activeTask && (
-          <div className="flex items-center gap-1.5 text-danger">
-            <span className="w-2 h-2 bg-danger rounded-full animate-pulse" />
-            <span className="text-sm font-semibold">LIVE</span>
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          {activeTask && (
+            <div className="flex items-center gap-1.5 text-danger">
+              <span className="w-2 h-2 bg-danger rounded-full animate-pulse" />
+              <span className="text-sm font-semibold">LIVE</span>
+            </div>
+          )}
+          <button
+            onClick={() => setShowPowerOffConfirm(true)}
+            disabled={isPoweringOff}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-100 text-text-secondary text-sm font-medium active:bg-gray-200 disabled:opacity-50"
+            aria-label="Power Off"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v5m0 0a7 7 0 110 14 7 7 0 010-14" />
+            </svg>
+            {isPoweringOff ? 'Shutting down\u2026' : 'Power Off'}
+          </button>
+        </div>
       </header>
+
+      {/* Power Off confirmation modal */}
+      {showPowerOffConfirm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6">
+          <div className="bg-surface rounded-2xl p-6 w-full max-w-sm shadow-xl">
+            <h2 className="text-lg font-semibold text-text-primary mb-2">Power Off?</h2>
+            <p className="text-sm text-text-secondary mb-6">
+              This will stop all tasks, home the actuators, and return to the power screen.
+              All current progress will be discarded.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowPowerOffConfirm(false)}
+                className="flex-1 inline-flex items-center justify-center font-semibold text-lg rounded-2xl min-h-[56px] px-8 py-4 bg-transparent text-text-primary active:bg-gray-100 active:scale-95 transition-all duration-150"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePowerOff}
+                className="flex-1 inline-flex items-center justify-center font-semibold text-lg rounded-2xl min-h-[56px] px-8 py-4 bg-gray-600 text-white active:bg-gray-700 active:scale-95 transition-all duration-150"
+              >
+                Power Off
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main content */}
       <div className="flex-1 p-4 space-y-4 pb-24">

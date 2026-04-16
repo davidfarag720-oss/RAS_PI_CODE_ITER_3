@@ -75,63 +75,66 @@ async def lifespan(app: FastAPI):
         set_config(config)
         logger.info("Configuration loaded and validated")
 
-        # Initialize STM32 communications
-        logger.info("Initializing STM32 communications...")
-        try:
-            serial_port = config.get_str('serial_port', '/dev/ttyAMA0')
-            serial_baudrate = config.get_int('serial_baudrate', 115200)
-
-            comms_manager = RaspiCommsManager(port=serial_port, baudrate=serial_baudrate)
-            if not comms_manager.connect():
-                logger.error("Failed to connect to STM32 - running in disconnected mode")
-                stm32_interface = None
-            else:
-                logger.info("STM32 connected successfully")
-                stm32_interface = STM32Interface(comms_manager)
-
-                # Perform config handshake
-                machine_config = get_machine_config()
-                logger.info("Performing config handshake...")
-
-                try:
-                    config_match = await stm32_interface.validate_config(
-                        num_hoppers=machine_config.num_hoppers,
-                        num_actuators=machine_config.num_actuators,
-                        bottom_gate=machine_config.bottom_gate_present,
-                        parallelization=machine_config.parallelization_enabled,
-                        num_vib_motors=machine_config.num_vibration_motors
-                    )
-
-                    if not config_match:
-                        logger.critical(
-                            "CONFIG MISMATCH: RasPi and STM32 configs do not match! "
-                            "Update config.json or reflash STM32 firmware. "
-                            "System will NOT enter main operation."
-                        )
-                        # Store global flag to prevent task creation
-                        app.state.config_mismatch = True
-                    else:
-                        logger.info("Config validation SUCCESS - system ready")
-                        app.state.config_mismatch = False
-
-                except Exception as e:
-                    logger.error(f"Config handshake failed: {e}")
-                    app.state.config_mismatch = True
-
-        except Exception as e:
-            logger.error(f"STM32 initialization failed: {e}")
-            comms_manager = None
-            stm32_interface = None
-            app.state.config_mismatch = True
-
-        # Mock override: replace real STM32 interface when STM32_MOCK=1
+        # Check for mock mode before attempting any serial connection
         import os
         if os.environ.get("STM32_MOCK") == "1":
             from backend.comms.mock_stm32 import MockSTM32Interface
             stm32_interface = MockSTM32Interface()
             app.state.config_mismatch = False
-            logger.info("STM32_MOCK=1: using MockSTM32Interface (no serial port)")
+            logger.info("STM32_MOCK=1: using MockSTM32Interface (skipping serial connection)")
             print("[mock] STM32_MOCK=1 active — MockSTM32Interface loaded", flush=True)
+        else:
+            # Initialize STM32 communications
+            logger.info("Initializing STM32 communications...")
+            try:
+                serial_port = config.get_str('serial_port', '/dev/ttyAMA0')
+                serial_baudrate = config.get_int('serial_baudrate', 115200)
+
+                comms_manager = RaspiCommsManager(port=serial_port, baudrate=serial_baudrate)
+                if not comms_manager.connect():
+                    logger.error("Failed to connect to STM32 - running in disconnected mode")
+                    stm32_interface = None
+                    app.state.config_mismatch = True
+                else:
+                    logger.info("STM32 connected successfully")
+                    stm32_interface = STM32Interface(comms_manager)
+
+                    # Perform config handshake
+                    machine_config = get_machine_config()
+                    logger.info("Performing config handshake...")
+
+                    try:
+                        config_match = await stm32_interface.validate_config(
+                            num_hoppers=machine_config.num_hoppers,
+                            num_actuators=machine_config.num_actuators,
+                            bottom_gate=machine_config.bottom_gate_present,
+                            parallelization=machine_config.parallelization_enabled,
+                            num_vib_motors=machine_config.num_vibration_motors
+                        )
+
+                        if not config_match:
+                            logger.critical(
+                                "CONFIG MISMATCH: RasPi and STM32 configs do not match! "
+                                "Update config.json or reflash STM32 firmware. "
+                                "System will NOT enter main operation."
+                            )
+                            app.state.config_mismatch = True
+                        else:
+                            logger.info("Config validation SUCCESS - waiting for Power On")
+                            app.state.config_mismatch = False
+
+                    except Exception as e:
+                        logger.error(f"Config handshake failed: {e}")
+                        app.state.config_mismatch = True
+
+            except Exception as e:
+                logger.error(f"STM32 initialization failed: {e}")
+                comms_manager = None
+                stm32_interface = None
+                app.state.config_mismatch = True
+
+        # System starts in powered-off state; operator must press Power On to home actuators
+        app.state.system_initialized = False
 
         # Initialize camera
         camera_manager = CameraManager()
@@ -383,6 +386,13 @@ async def create_task(request: TaskCreateRequest, background_tasks: BackgroundTa
             detail="Config mismatch detected - cannot create tasks until resolved. Check logs for details."
         )
 
+    # Check system is initialized (Power On must be pressed first)
+    if not getattr(app.state, 'system_initialized', False):
+        raise HTTPException(
+            status_code=503,
+            detail="System not initialized. Press Power On to home actuators before starting tasks."
+        )
+
     # Validate vegetable exists
     veg = config.get_vegetable(request.vegetable_id)
     if not veg:
@@ -594,6 +604,70 @@ async def restart_system():
     })
 
     return {"tasks_requeued": count}
+
+
+@app.post("/api/power-on", status_code=200)
+async def power_on():
+    """
+    Initialize the system: home all actuators then mark system as ready.
+
+    Must be called before tasks can be created. Sends CMD_CUT_HOME to the STM32
+    which runs the full boot sequence (~30-45s), then marks system_initialized=True.
+
+    Sequence: reset_system (clear any stale e-stop) -> home_actuators (~30-45s) -> ready.
+    """
+    if not stm32_interface:
+        raise HTTPException(status_code=503, detail="STM32 not connected")
+
+    if getattr(app.state, 'config_mismatch', False):
+        raise HTTPException(status_code=503, detail="Config mismatch - resolve before powering on")
+
+    if getattr(app.state, 'system_initialized', False):
+        raise HTTPException(status_code=409, detail="System is already initialized")
+
+    try:
+        await stm32_interface.reset_system()
+        await stm32_interface.home_actuators()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Power on failed: {str(e)}")
+
+    app.state.system_initialized = True
+
+    await broadcast_system_event({'event': 'system_powered_on'})
+
+    return {"status": "ready"}
+
+
+@app.post("/api/power-off", status_code=200)
+async def power_off():
+    """
+    Graceful shutdown: stop all tasks, home actuators, discard tasks, mark system as off.
+
+    Sequence: block new tasks -> emergency stop -> clear all tasks ->
+              reset_system -> home_actuators (~30-45s) -> system_initialized=False.
+    """
+    # Block new tasks immediately
+    app.state.system_initialized = False
+
+    # Halt all in-flight motion
+    if stm32_interface:
+        await stm32_interface.emergency_stop()
+
+    # Mark all tasks as STOPPED and discard them (no re-queue on power off)
+    await task_manager.emergency_stop()
+    await task_manager.discard_all_tasks()
+
+    # Home actuators to leave machine in safe state
+    if stm32_interface:
+        try:
+            await stm32_interface.reset_system()
+            await stm32_interface.home_actuators()
+        except Exception as e:
+            logging.getLogger('FastAPI').warning(f"Homing during power-off failed: {e}")
+
+    await broadcast_system_event({'event': 'system_powered_off'})
+
+    return {"status": "off"}
 
 
 # ============================================================================

@@ -646,6 +646,21 @@ class TaskManager:
         self.logger.info(f"RESTART complete: {count} tasks re-queued")
         return count
 
+    async def discard_all_tasks(self):
+        """
+        Permanently discard all tasks (STOPPED, QUEUED, CANCELLED, COMPLETED, FAILED).
+
+        Called during power-off to wipe state clean. Releases all bay reservations.
+        Unlike emergency_stop, tasks are not eligible for restart.
+        """
+        self.logger.info("POWER OFF: discarding all tasks")
+        self.tasks.clear()
+        self.task_queue.clear()
+        self.stopped_task_ids.clear()
+        self.active_bays.clear()
+        self.reserved_bays.clear()
+        self.logger.info("POWER OFF: all tasks and bay reservations cleared")
+
     # ========================================================================
     # TASK QUERIES
     # ========================================================================

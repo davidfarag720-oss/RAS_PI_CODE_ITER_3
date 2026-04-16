@@ -14,6 +14,7 @@ Date: February 2026
 
 import asyncio
 import logging
+import os
 import time
 from typing import List, Tuple, Any, Optional
 
@@ -97,7 +98,9 @@ class MockSTM32Interface:
         self._record("reset_system()", "OK")
 
     async def home_actuators(self) -> None:
-        await self._prompt("[mock] home_actuators — press Enter when actuators are homed: ")
+        delay = float(os.environ.get("STM32_MOCK_HOME_DELAY", "2"))
+        print(f"[mock] home_actuators — simulating {delay}s homing sequence...", flush=True)
+        await asyncio.sleep(delay)
         self._record("home_actuators()", "done")
 
     # ------------------------------------------------------------------ #

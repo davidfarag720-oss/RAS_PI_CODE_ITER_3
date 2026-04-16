@@ -19,6 +19,7 @@ interface AppState {
   tasks: Task[];
   systemStatus: SystemStatus | null;
   machineConfig: MachineConfig | null;
+  systemInitialized: boolean;
   isLoading: boolean;
   error: string | null;
 }
@@ -33,6 +34,7 @@ type AppAction =
   | { type: 'DISMISS_TASK'; payload: string }  // client-side dismiss of completed task
   | { type: 'SET_SYSTEM_STATUS'; payload: SystemStatus }
   | { type: 'SET_MACHINE_CONFIG'; payload: MachineConfig }
+  | { type: 'SET_SYSTEM_INITIALIZED'; payload: boolean }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string | null };
 
@@ -42,6 +44,7 @@ const initialState: AppState = {
   tasks: [],
   systemStatus: null,
   machineConfig: null,
+  systemInitialized: false,
   isLoading: true,
   error: null,
 };
@@ -79,6 +82,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, systemStatus: action.payload };
     case 'SET_MACHINE_CONFIG':
       return { ...state, machineConfig: action.payload };
+    case 'SET_SYSTEM_INITIALIZED':
+      return { ...state, systemInitialized: action.payload };
     case 'SET_LOADING':
       return { ...state, isLoading: action.payload };
     case 'SET_ERROR':
@@ -138,8 +143,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (update.type === 'task_update' && update.data) {
       dispatch({ type: 'UPDATE_TASK', payload: update.data as unknown as Task });
     }
-    // system_event messages (emergency_stop, system_restarted)
+    // system_event messages (emergency_stop, system_restarted, power on/off)
     else if (update.type === 'system_event' && update.data) {
+      const evt = (update.data as Record<string, unknown>).event as string | undefined;
+      if (evt === 'system_powered_on') {
+        dispatch({ type: 'SET_SYSTEM_INITIALIZED', payload: true });
+      } else if (evt === 'system_powered_off') {
+        dispatch({ type: 'SET_SYSTEM_INITIALIZED', payload: false });
+      }
       // Refresh all data to pick up STOPPED task statuses
       refreshData();
       return; // refreshData already fetches system status
