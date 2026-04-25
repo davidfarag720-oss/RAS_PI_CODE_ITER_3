@@ -584,6 +584,27 @@ class RaspiCommsManager:
         """Emergency stop all motion."""
         return self.send_command(CommandCode.CMD_EMERGENCY_STOP, 0, 0, timeout=timeout)
 
+    def reset_system(self, timeout: float = 1.0) -> Response:
+        """Clear emergency stop flag and restore normal operation."""
+        return self.send_command(CommandCode.CMD_RESET_SYSTEM, 0, 0, timeout=timeout)
+
+    def scale_read(self, timeout: float = 1.0) -> Optional[float]:
+        """Read weight from scale. Returns grams as float, or None on error."""
+        resp = self.send_command(CommandCode.CMD_SCALE_READ, 0, 0, timeout=timeout)
+        if resp and resp.status == ResponseStatus.RESP_OK:
+            return float(resp.data)
+        return None
+
+    def scale_tare(self, timeout: float = 1.0) -> bool:
+        """Tare (zero) the scale."""
+        resp = self.send_command(CommandCode.CMD_SCALE_TARE, 0, 0, timeout=timeout)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+
+    def vibration_all_off(self, timeout: float = 1.0) -> bool:
+        """Turn off all vibration motors."""
+        resp = self.send_command(CommandCode.CMD_VIB_ALL_OFF, 0, 0, timeout=timeout)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+
 
 # ============================================================================
 # HIGH-LEVEL INTERFACE
