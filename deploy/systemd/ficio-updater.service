@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
+Environment=FICIO_USER=pi
 ExecStart=/home/pi/vegetable-slicer/deploy/ficio-updater.sh
 StandardOutput=journal
 StandardError=journal

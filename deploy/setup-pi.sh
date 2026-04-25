@@ -94,6 +94,13 @@ sudo cp "$INSTALL_DIR/deploy/systemd/ficio-api.service"      /etc/systemd/system
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-kiosk.service"    /etc/systemd/system/
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-updater.service"  /etc/systemd/system/
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-updater.timer"    /etc/systemd/system/
+# Patch user and paths into service files
+sudo sed -i "s|User=pi|User=$PI_USER|g" /etc/systemd/system/ficio-api.service
+sudo sed -i "s|User=pi|User=$PI_USER|g" /etc/systemd/system/ficio-kiosk.service
+sudo sed -i "s|FICIO_USER=pi|FICIO_USER=$PI_USER|g" /etc/systemd/system/ficio-updater.service
+sudo sed -i "s|/home/pi|/home/$PI_USER|g" /etc/systemd/system/ficio-api.service
+sudo sed -i "s|/home/pi|/home/$PI_USER|g" /etc/systemd/system/ficio-kiosk.service
+sudo sed -i "s|/home/pi|/home/$PI_USER|g" /etc/systemd/system/ficio-updater.service
 sudo systemctl daemon-reload
 sudo systemctl enable ficio-api.service
 sudo systemctl enable ficio-kiosk.service

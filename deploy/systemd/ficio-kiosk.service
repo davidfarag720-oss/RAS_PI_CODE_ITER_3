@@ -13,12 +13,14 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf http://localhost:8000/health && exit 0; sleep 2; done; echo "API health check failed after 60s" >&2; exit 1'
 ExecStart=/usr/bin/chromium-browser \
   --kiosk \
+  --app=http://localhost:8000 \
   --noerrdialogs \
   --disable-infobars \
   --disable-session-crashed-bubble \
   --disable-component-update \
-  --check-for-update-interval=31536000 \
-  http://localhost:8000
+  --disable-pinch \
+  --overscroll-history-navigation=0 \
+  --check-for-update-interval=31536000
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

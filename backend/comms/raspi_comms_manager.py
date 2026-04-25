@@ -482,7 +482,10 @@ class RaspiCommsManager:
         if parallelization:
             flags |= 0x02
 
-        return self.send_command(0x52, num_hoppers, num_actuators, timeout=timeout)
+        param1 = (num_hoppers & 0x0F) | ((num_actuators & 0x0F) << 4)
+        param2 = (num_vib_motors & 0x0F) | ((flags & 0x0F) << 4)
+
+        return self.send_command(0x52, param1, param2, timeout=timeout)
 
     def dispose(self, gate_id: int = 1, timeout: float = 3.0) -> Response:
         """

@@ -4,9 +4,10 @@
 # Rolls back automatically if the new version fails the health check.
 set -euo pipefail
 
-INSTALL_DIR="/home/pi/vegetable-slicer"
+FICIO_USER="${FICIO_USER:-${SUDO_USER:-pi}}"
+INSTALL_DIR="/home/${FICIO_USER}/vegetable-slicer"
 GITHUB_REPO="davidfarag720-oss/RAS_PI_CODE_ITER_3"
-BACKUP_DIR="/home/pi/vegetable-slicer-backup"
+BACKUP_DIR="/home/${FICIO_USER}/vegetable-slicer-backup"
 TEMP_DIR="/tmp/ficio-update-$$"
 
 log() { echo "[ficio-updater] $*" | systemd-cat -t ficio-updater -p info; echo "[ficio-updater] $*"; }
@@ -20,7 +21,7 @@ LOCAL_VERSION=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 log "Local version: $LOCAL_VERSION"
 
 # ── 2. Fetch latest release tag from GitHub ───────────────────────────────────
-if ! LATEST_TAG=$(sudo -u pi gh release view --repo "$GITHUB_REPO" --json tagName -q '.tagName' 2>/dev/null); then
+if ! LATEST_TAG=$(sudo -u "$FICIO_USER" gh release view --repo "$GITHUB_REPO" --json tagName -q '.tagName' 2>/dev/null); then
     log_err "Failed to reach GitHub (offline?). Skipping update check."
     exit 0
 fi
@@ -35,8 +36,9 @@ log "New version available: $LOCAL_VERSION → $LATEST_VERSION"
 
 # ── 3. Download tarball ───────────────────────────────────────────────────────
 mkdir -p "$TEMP_DIR"
+chown "$FICIO_USER:$FICIO_USER" "$TEMP_DIR"
 log "Downloading v$LATEST_VERSION..."
-if ! sudo -u pi gh release download "$LATEST_TAG" \
+if ! sudo -u "$FICIO_USER" gh release download "$LATEST_TAG" \
         --repo "$GITHUB_REPO" \
         --pattern '*.tar.gz' \
         --dir "$TEMP_DIR" 2>&1; then
@@ -74,7 +76,7 @@ if [ -d "$INSTALL_DIR/data" ]; then
     cp -a "$INSTALL_DIR/data" "$TEMP_DIR/extracted/data"
 fi
 
-chown -R pi:pi "$TEMP_DIR/extracted"
+chown -R "$FICIO_USER:$FICIO_USER" "$TEMP_DIR/extracted"
 
 # ── 6. Atomic swap ────────────────────────────────────────────────────────────
 log "Applying update..."
@@ -84,7 +86,7 @@ mv "$TEMP_DIR/extracted" "$INSTALL_DIR"
 
 # ── 7. Install updated Python dependencies ────────────────────────────────────
 log "Installing dependencies..."
-sudo -u pi "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt" 2>&1 || true
+sudo -u "$FICIO_USER" "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt" 2>&1 || true
 
 # ── 8. Restart API and health check ──────────────────────────────────────────
 log "Restarting API service..."

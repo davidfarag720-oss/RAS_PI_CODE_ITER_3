@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 import logging
 import asyncio
+import os
 import cv2
 import json
 from typing import Dict, List, Optional, Set
@@ -228,16 +229,14 @@ app.add_middleware(
 # STATIC FILES
 # ============================================================================
 
-# Serve vegetable images and other assets
-install_path = Path("/home/dfarag/vegetable-slicer")
-assets_path = install_path / "assets"
-
-# Also check for local development paths
-local_assets_path = Path(__file__).parent.parent.parent / "assets"
-if assets_path.exists():
-    app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
-elif local_assets_path.exists():
-    app.mount("/assets", StaticFiles(directory=str(local_assets_path)), name="assets")
+# Serve vegetable images — mount at /assets/ui specifically so it doesn't shadow frontend JS/CSS
+install_path = Path("/home") / os.environ.get("USER", "pi") / "vegetable-slicer"
+ui_images_path = install_path / "assets" / "ui"
+local_ui_images_path = Path(__file__).parent.parent.parent / "assets" / "ui"
+if ui_images_path.exists():
+    app.mount("/assets/ui", StaticFiles(directory=str(ui_images_path)), name="ui-images")
+elif local_ui_images_path.exists():
+    app.mount("/assets/ui", StaticFiles(directory=str(local_ui_images_path)), name="ui-images")
 
 # Serve React frontend build
 frontend_dist_path = Path(__file__).parent.parent.parent / "frontend" / "dist"
@@ -315,7 +314,7 @@ async def list_cut_types():
 
 
 @app.get("/api/config/machine")
-async def get_machine_config():
+async def machine_config_endpoint():
     """
     Get machine variant configuration.
 
@@ -913,7 +912,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 if frontend_dist_path.exists():
     frontend_assets = frontend_dist_path / "assets"
     if frontend_assets.exists():
-        app.mount("/static", StaticFiles(directory=str(frontend_assets)), name="frontend-static")
+        app.mount("/assets", StaticFiles(directory=str(frontend_assets)), name="frontend-static")
 
 
 @app.get("/{full_path:path}")
