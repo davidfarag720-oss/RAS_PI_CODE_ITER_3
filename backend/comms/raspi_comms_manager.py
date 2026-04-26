@@ -59,9 +59,10 @@ class CommandCode(IntEnum):
     CMD_GATE_OPEN = 0x10        # PARAM1: gate_id (1-6), PARAM2: unused
     CMD_GATE_CLOSE = 0x11       # PARAM1: gate_id (1-6), PARAM2: unused
     CMD_GATE_CYCLE = 0x12       # PARAM1: gate_id (1-6), PARAM2: unused
-    CMD_HOPPER_DISPENSE = 0x13  # PARAM1: hopper_id (1-4), PARAM2: unused
-                                # (includes vibration + smart laser detection)
-    CMD_DISPOSE = 0x14          # PARAM1: gate_id (1-2), PARAM2: unused
+    CMD_HOPPER_DISPENSE = 0x13      # PARAM1: hopper_id (1-4), PARAM2: unused
+                                    # (includes vibration + smart laser detection)
+    CMD_HOPPER_MARK_LOADED = 0x18   # PARAM1: hopper_id (1-4), clears empty flag
+    CMD_DISPOSE = 0x14              # PARAM1: gate_id (1-2), PARAM2: unused
     CMD_LOAD_CUTTER = 0x15      # PARAM1: gate_id (1-2), PARAM2: unused
     CMD_QUERY_GATE = 0x16       # PARAM1: gate_id (1-2), PARAM2: unused
     
@@ -603,6 +604,16 @@ class RaspiCommsManager:
     def vibration_all_off(self, timeout: float = 1.0) -> bool:
         """Turn off all vibration motors."""
         resp = self.send_command(CommandCode.CMD_VIB_ALL_OFF, 0, 0, timeout=timeout)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+
+    def hopper_mark_loaded(self, hopper_id: int, timeout: float = 1.0) -> bool:
+        """Inform STM32 that a hopper has been physically loaded, clearing the empty flag."""
+        resp = self.send_command(CommandCode.CMD_HOPPER_MARK_LOADED, hopper_id, 0, timeout=timeout)
+        return resp is not None and resp.status == ResponseStatus.RESP_OK
+
+    def cut_home(self, timeout: float = 45.0) -> bool:
+        """Run full cutter boot sequence and home all servos. Blocks up to ~30s on STM32."""
+        resp = self.send_command(CommandCode.CMD_CUT_HOME, 0, 0, timeout=timeout)
         return resp is not None and resp.status == ResponseStatus.RESP_OK
 
 

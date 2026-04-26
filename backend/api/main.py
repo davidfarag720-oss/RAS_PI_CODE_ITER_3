@@ -613,7 +613,7 @@ async def power_on():
     Must be called before tasks can be created. Sends CMD_CUT_HOME to the STM32
     which runs the full boot sequence (~30-45s), then marks system_initialized=True.
 
-    Sequence: reset_system (clear any stale e-stop) -> home_actuators (~30-45s) -> ready.
+    Sequence: emergency_stop (reset all FSMs) -> reset_system -> home_actuators (~30-45s) -> ready.
     """
     if not stm32_interface:
         raise HTTPException(status_code=503, detail="STM32 not connected")
@@ -625,6 +625,11 @@ async def power_on():
         raise HTTPException(status_code=409, detail="System is already initialized")
 
     try:
+        # Reset all hardware FSMs (gate, cutter, hopper) in case they're stuck from a prior session.
+        # Cutter_Boot_Up (inside home_actuators) resets cutter FSM explicitly, but Gate_EmergencyStop
+        # is only triggered by CMD_EMERGENCY_STOP — so we must call it here to guarantee GATE_IDLE.
+        await stm32_interface.emergency_stop()
+        await asyncio.sleep(0.5)  # Let emergency-stop servo close commands execute
         await stm32_interface.reset_system()
         await stm32_interface.home_actuators()
     except Exception as e:

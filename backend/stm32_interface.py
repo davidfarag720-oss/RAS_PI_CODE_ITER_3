@@ -89,18 +89,56 @@ class STM32Interface:
 
         self.logger.info(f"Dispose sequence complete (gate {gate_id})")
 
+    async def wait_for_gate_idle(self, gate_id: int = 1, timeout: float = 20.0,
+                                  poll_interval: float = 0.2) -> None:
+        """Poll gate status until IDLE (status code 0). Used before re-issuing load_cutter.
+
+        If the gate reports GATE_STATUS_ERROR (0xFF), sends emergency stop + reset to recover
+        the gate FSM before returning — the caller can then safely retry CMD_LOAD_CUTTER.
+        """
+        start = asyncio.get_event_loop().time()
+        last_status: Optional[int] = None
+
+        while True:
+            response = await self._run_sync(self.comms.query_gate, gate_id)
+            if response and response.status == ResponseStatus.RESP_OK:
+                gate_status = response.data & 0xFF  # DATA_L = status code
+                last_status = gate_status
+
+                if gate_status == 0x00:  # GATE_STATUS_IDLE
+                    return
+
+                if gate_status == 0xFF:  # GATE_STATUS_ERROR — permanent, must recover
+                    self.logger.warning(
+                        f"wait_for_gate_idle: gate {gate_id} in ERROR state — "
+                        "sending emergency stop to reset FSM"
+                    )
+                    await self.emergency_stop()
+                    await asyncio.sleep(2.0)  # Let close servo commands settle
+                    await self.reset_system()  # Clear e-stop flag
+                    return  # Gate FSM is now IDLE; caller will proceed to CMD_LOAD_CUTTER
+
+            elapsed = asyncio.get_event_loop().time() - start
+            if elapsed > timeout:
+                status_hex = f"0x{last_status:02X}" if last_status is not None else "??"
+                self.logger.warning(
+                    f"wait_for_gate_idle: gate {gate_id} not idle after {timeout:.0f}s "
+                    f"(last status={status_hex}), proceeding"
+                )
+                return
+            await asyncio.sleep(poll_interval)
+
     async def load_cutter(self, gate_id: int = 1, wait_for_cutter_idle: bool = True) -> None:
         """
         Execute load-cutter sequence and wait for hardware confirmation that the gate
         has reached Position C before returning.
 
         Sequence:
-          1. (optional) Poll cutter until idle — prevents parallel-mode overlap
-          2. Clear the gate-at-C event latch (prevent stale event race)
-          3. Send CMD_LOAD_CUTTER
-          4. Wait up to 5s for EVENT_GATE_AT_POSITION_C notification from STM32
-             - If received: return normally (gate confirmed loaded)
-             - If timeout: log warning and return (proceed with caution; STM32 may still be moving)
+          1. (optional) Poll cutter until idle
+          2. Poll gate until idle (gate may still be returning to base from previous cycle)
+          3. Clear the gate-at-C event latch (prevent stale event race)
+          4. Send CMD_LOAD_CUTTER
+          5. Wait up to 5s for EVENT_GATE_AT_POSITION_C notification from STM32
 
         Args:
             gate_id: Gate ID (1=top, 2=bottom)
@@ -112,16 +150,18 @@ class STM32Interface:
         if wait_for_cutter_idle:
             await self.wait_for_cutter_idle(timeout=30.0)
 
-        # Step 1: Clear event latch BEFORE sending command to avoid race condition
-        # (STM32 could theoretically fire the event very quickly after CMD_LOAD_CUTTER)
+        # Wait for gate to finish returning to base from the previous cycle
+        await self.wait_for_gate_idle(gate_id, timeout=20.0)
+
+        # Clear event latch BEFORE sending command to avoid race condition
         self.comms._gate_at_c_event.clear()
         self.comms._gate_at_c_gate_id = 0
 
-        # Step 2: Send CMD_LOAD_CUTTER
+        # Send CMD_LOAD_CUTTER
         response = await self._run_sync(self.comms.load_cutter, gate_id)
 
         if response.status == ResponseStatus.RESP_BUSY:
-            raise RuntimeError("Load-cutter blocked: cutter still busy (parallel mode)")
+            raise RuntimeError(f"Load-cutter blocked: gate {gate_id} busy")
         elif response.status != ResponseStatus.RESP_OK:
             raise RuntimeError(f"Load-cutter failed: {response.status}")
 
@@ -260,3 +300,7 @@ class STM32Interface:
         success = await loop.run_in_executor(None, self.comms.cut_home)
         if not success:
             raise RuntimeError("Actuator home sequence failed")
+
+    async def hopper_mark_loaded(self, hopper_id: int) -> None:
+        """Notify STM32 that a hopper has been physically loaded by the operator."""
+        await self._run_sync(self.comms.hopper_mark_loaded, hopper_id)

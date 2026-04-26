@@ -179,7 +179,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch {
         // silent — don't surface background poll failures to the user
       }
-    }, 3000);
+    }, 10000);
     return () => clearInterval(id);
   }, []); // empty deps: runs once for the lifetime of the provider
 

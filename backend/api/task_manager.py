@@ -39,6 +39,10 @@ class MockSTM32Interface:
     async def is_hopper_empty(self, bay_id: int) -> bool:
         return self._hopper_items.get(bay_id, 0) <= 0
 
+    async def hopper_mark_loaded(self, hopper_id: int) -> None:
+        self._hopper_items[hopper_id] = random.randint(30, 80)
+        self.logger.debug(f"Mock: Hopper {hopper_id} marked loaded")
+
     async def hopper_dispense(self, bay_id: int) -> bool:
         if self._hopper_items.get(bay_id, 0) > 0:
             self._hopper_items[bay_id] -= 1
@@ -274,12 +278,19 @@ class TaskManager:
         self.tasks[task_id] = task
         self.task_queue.append(task_id)
         self.reserved_bays.add(bay_id)  # Reserve bay immediately
-        
+
+        # Notify STM32 that the operator has loaded this hopper
+        try:
+            await self.stm32_interface.hopper_mark_loaded(bay_id)
+            self.logger.info(f"Hopper {bay_id} marked as loaded on STM32")
+        except Exception as e:
+            self.logger.warning(f"Failed to mark hopper {bay_id} loaded: {e}")
+
         self.logger.info(
             f"Task created: {task_id} - {veg_config.name} ({cut_type}) "
             f"on bay {bay_id}, will run until hopper empty"
         )
-        
+
         return task
     
     # ========================================================================
