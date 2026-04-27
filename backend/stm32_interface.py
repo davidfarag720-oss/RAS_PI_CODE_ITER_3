@@ -194,21 +194,56 @@ class STM32Interface:
 
     async def hopper_dispense(self, hopper_id: int) -> bool:
         """
-        Dispense from hopper.
+        Dispense from hopper. Blocks until laser trips (or dispense times out).
 
         Returns:
             True if laser triggered (success), False if timeout (possibly empty)
         """
         response = await self._run_sync(self.comms.hopper_dispense, hopper_id)
 
-        if response.status == ResponseStatus.RESP_OK:
-            self.logger.info(f"Hopper {hopper_id} dispensed (laser trigger)")
-            return True
-        elif response.status == ResponseStatus.RESP_TIMEOUT:
-            self.logger.warning(f"Hopper {hopper_id} dispense timeout (possibly empty)")
-            return False
-        else:
+        if response.status == ResponseStatus.RESP_INVALID_PARAM:
+            raise RuntimeError(f"Hopper {hopper_id} dispense rejected (invalid ID or busy)")
+        elif response.status != ResponseStatus.RESP_OK:
             raise RuntimeError(f"Hopper dispense failed: {response.status}")
+
+        # RESP_OK means STM32 started the dispense asynchronously.
+        # Poll until laser trips (CLOSING state) or cycle finishes (IDLE).
+        return await self.wait_for_hopper_idle(hopper_id, timeout=10.0)
+
+    async def wait_for_hopper_idle(self, hopper_id: int, timeout: float = 10.0,
+                                   poll_interval: float = 0.1) -> bool:
+        """Poll hopper status until FSM reaches CLOSING or IDLE (laser decision made).
+
+        CLOSING means the laser has already tripped (or dispense timed out) — the item
+        is already in the staging area. No need to wait for the gate to finish closing.
+
+        Returns:
+            True if laser tripped (item fell), False if dispense timed out (possibly empty)
+        """
+        await asyncio.sleep(0.2)  # Let Hopper_Tick process IDLE→OPENING before first poll
+
+        start = asyncio.get_event_loop().time()
+        while True:
+            response = await self._run_sync(self.comms.query_hopper, hopper_id)
+            if response and response.status == ResponseStatus.RESP_OK:
+                data_l = response.data & 0xFF
+                gate_state = (data_l >> 2) & 0x07  # bits [2-4]: 0=IDLE,1=OPENING,2=WAIT_FALL,3=CLOSING
+                if gate_state == 0 or gate_state == 3:  # IDLE or CLOSING — laser decision made
+                    last_success = bool(data_l & 0x02)  # bit 1
+                    if last_success:
+                        self.logger.info(f"Hopper {hopper_id}: laser triggered, item in staging")
+                    else:
+                        self.logger.warning(f"Hopper {hopper_id}: dispense timed out (possibly empty)")
+                    return last_success
+
+            elapsed = asyncio.get_event_loop().time() - start
+            if elapsed > timeout:
+                self.logger.warning(
+                    f"wait_for_hopper_idle: hopper {hopper_id} not CLOSING/IDLE "
+                    f"after {timeout:.0f}s — proceeding"
+                )
+                return False
+            await asyncio.sleep(poll_interval)
 
     # ========================================================================
     # STATE POLLING
