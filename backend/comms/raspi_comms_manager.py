@@ -183,7 +183,9 @@ class RaspiCommsManager:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=self.timeout
+                exclusive=True  # Ensure exclusive access to the serial port
             )
+            time.sleep(0.5) # Short delay to allow serial port to initialize and flush any startup bytes
             
             # Flush any stale data
             self.serial.reset_input_buffer()
