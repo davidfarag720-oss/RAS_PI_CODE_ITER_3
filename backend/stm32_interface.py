@@ -212,10 +212,11 @@ class STM32Interface:
 
     async def wait_for_hopper_idle(self, hopper_id: int, timeout: float = 10.0,
                                    poll_interval: float = 0.1) -> bool:
-        """Poll hopper status until FSM reaches CLOSING or IDLE (laser decision made).
+        """Poll hopper status until FSM returns to IDLE (dispense cycle fully complete).
 
-        CLOSING means the laser has already tripped (or dispense timed out) — the item
-        is already in the staging area. No need to wait for the gate to finish closing.
+        We intentionally wait for IDLE rather than exiting at CLOSING to ensure the
+        dispense sequence is finished before the orchestrator starts downstream steps
+        (e.g., loading the cutter).
 
         Returns:
             True if laser tripped (item fell), False if dispense timed out (possibly empty)
@@ -223,23 +224,34 @@ class STM32Interface:
         await asyncio.sleep(0.2)  # Let Hopper_Tick process IDLE→OPENING before first poll
 
         start = asyncio.get_event_loop().time()
+        saw_active_state = False
         while True:
             response = await self._run_sync(self.comms.query_hopper, hopper_id)
             if response and response.status == ResponseStatus.RESP_OK:
                 data_l = response.data & 0xFF
                 gate_state = (data_l >> 2) & 0x07  # bits [2-4]: 0=IDLE,1=OPENING,2=WAIT_FALL,3=CLOSING
-                if gate_state == 0 or gate_state == 3:  # IDLE or CLOSING — laser decision made
+                if gate_state in (1, 2, 3):
+                    saw_active_state = True
+
+                # Only treat IDLE as completion if we have observed this cycle leave IDLE first.
+                # This avoids returning early on a stale pre-dispense IDLE sample.
+                if gate_state == 0 and saw_active_state:  # IDLE — full dispense cycle complete
                     last_success = bool(data_l & 0x02)  # bit 1
                     if last_success:
-                        self.logger.info(f"Hopper {hopper_id}: laser triggered, item in staging")
+                        self.logger.info(
+                            f"Hopper {hopper_id}: cycle complete, laser triggered, item in staging"
+                        )
                     else:
-                        self.logger.warning(f"Hopper {hopper_id}: dispense timed out (possibly empty)")
+                        self.logger.warning(
+                            f"Hopper {hopper_id}: cycle complete, dispense timed out (possibly empty)"
+                        )
                     return last_success
 
             elapsed = asyncio.get_event_loop().time() - start
             if elapsed > timeout:
                 self.logger.warning(
-                    f"wait_for_hopper_idle: hopper {hopper_id} not CLOSING/IDLE "
+                    f"wait_for_hopper_idle: hopper {hopper_id} did not complete "
+                    f"(saw_active_state={saw_active_state}) and return to IDLE "
                     f"after {timeout:.0f}s — proceeding"
                 )
                 return False
