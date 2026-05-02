@@ -17,6 +17,7 @@ import serial
 import threading
 import time
 import logging
+import traceback
 from typing import Optional, Callable, Dict
 from dataclasses import dataclass
 from enum import IntEnum
@@ -36,6 +37,8 @@ class ProtocolConstants:
     # Start bytes
     START_BYTE_RX = 0xA5  # STM32 sends this
     START_BYTE_TX = 0x5A  # RasPi sends this
+    PING_ECHO_PARAM1 = 0xA5
+    PING_ECHO_PARAM2 = 0x5A
     
     # TX Packet indices (RasPi -> STM32)
     TX_START_IDX = 0
@@ -150,6 +153,7 @@ class RaspiCommsManager:
         self.rx_thread_healthy: bool = False
         self.rx_thread_heartbeat: float = 0.0
         self.rx_thread_last_exception: Optional[str] = None
+        self.rx_thread_last_traceback: Optional[str] = None
         
         # Response handling
         self.response_lock = threading.Lock()
@@ -210,14 +214,15 @@ class RaspiCommsManager:
             self._gate_at_c_gate_id = 0
             self.rx_thread_heartbeat = time.time()
             self.rx_thread_last_exception = None
+            self.rx_thread_last_traceback = None
             self.rx_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self.rx_thread.start()
 
             # Validate RX path with retry-friendly startup ping handshake.
-            ping_param1 = 0xA5
-            ping_param2 = 0x5A
+            ping_param1 = ProtocolConstants.PING_ECHO_PARAM1
+            ping_param2 = ProtocolConstants.PING_ECHO_PARAM2
             expected_echo = (ping_param1 << 8) | ping_param2
-            ping_response = None
+            handshake_ok = False
             for attempt in range(1, 4):
                 ping_response = self.send_command(
                     CommandCode.CMD_PING,
@@ -243,9 +248,10 @@ class RaspiCommsManager:
                     )
                     time.sleep(0.25)
                     continue
+                handshake_ok = True
                 break
 
-            if not ping_response or ping_response.status != ResponseStatus.RESP_OK or ping_response.data != expected_echo:
+            if not handshake_ok:
                 self.logger.error("STM32 startup handshake failed after 3 PING attempts")
                 self.disconnect()
                 return False
@@ -389,7 +395,7 @@ class RaspiCommsManager:
                     data = self.serial.read(self.serial.in_waiting)
                     packet_buffer.extend(data)
                     if preview_budget > 0:
-                        self.logger.info(f"RX startup bytes: {data[:16].hex(' ')}")
+                        self.logger.debug(f"RX startup bytes: {data[:16].hex(' ')}")
                         preview_budget -= 1
                 
                 # Try to parse packets from buffer
@@ -424,11 +430,15 @@ class RaspiCommsManager:
                 
         except serial.SerialException as e:
             self.rx_thread_last_exception = repr(e)
+            self.rx_thread_last_traceback = traceback.format_exc()
             self.logger.exception(f"Serial read error in RX thread: {e}")
         except Exception as e:
             self.rx_thread_last_exception = repr(e)
+            self.rx_thread_last_traceback = traceback.format_exc()
             self.logger.exception("Unhandled exception in RX thread")
         finally:
+            with self.response_lock:
+                self.last_response = None
             self.running = False
             self.rx_thread_healthy = False
             self.logger.error(

@@ -9,6 +9,8 @@ WorkingDirectory=/home/pi/vegetable-slicer
 Environment=PATH=/home/pi/vegetable-slicer/venv/bin:/usr/bin:/bin
 ExecStartPre=/bin/mkdir -p /home/pi/vegetable-slicer/data/cv_images /home/pi/vegetable-slicer/logs /home/pi/vegetable-slicer/models /home/pi/vegetable-slicer/assets/ui
 ExecStart=/home/pi/vegetable-slicer/venv/bin/uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --log-level info
+# Allow UART device teardown to settle before any immediate restart/open.
+ExecStopPost=/bin/sleep 2
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
