@@ -88,9 +88,9 @@ mv "$TEMP_DIR/extracted" "$INSTALL_DIR"
 log "Installing dependencies..."
 sudo -u "$FICIO_USER" "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt" 2>&1 || true
 
-# ── 8. Restart API and health check ──────────────────────────────────────────
-log "Restarting API service..."
-systemctl restart ficio-api.service
+# ── 8. Cold-restart API/kiosk stack and health check ────────────────────────
+log "Cold-restarting API/kiosk services..."
+"$INSTALL_DIR/deploy/restart-ficio-services.sh"
 
 log "Waiting for health check..."
 HEALTHY=false
@@ -106,10 +106,7 @@ if $HEALTHY; then
     # ── 9. Success ────────────────────────────────────────────────────────────
     rm -rf "$BACKUP_DIR"
     log "Update to v$LATEST_VERSION successful."
-    # Restart kiosk if it's active so it picks up any frontend changes
-    if systemctl is-active --quiet ficio-kiosk.service; then
-        systemctl restart ficio-kiosk.service
-    fi
+    # Kiosk already restarted by restart-ficio-services.sh
 else
     # ── 10. Rollback ─────────────────────────────────────────────────────────
     log_err "Health check failed after update to v$LATEST_VERSION. Rolling back to v$LOCAL_VERSION..."

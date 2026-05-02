@@ -93,6 +93,7 @@ echo "Installing systemd services..."
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-api.service"      /etc/systemd/system/
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-kiosk.service"    /etc/systemd/system/
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-updater.service"  /etc/systemd/system/
+sudo chmod +x "$INSTALL_DIR/deploy/restart-ficio-services.sh"
 sudo cp "$INSTALL_DIR/deploy/systemd/ficio-updater.timer"    /etc/systemd/system/
 # Patch user and paths into service files
 sudo sed -i "s|User=pi|User=$PI_USER|g" /etc/systemd/system/ficio-api.service
@@ -178,6 +179,7 @@ echo "  journalctl -u ficio-updater -f           — stream updater logs"
 echo "  sudo systemctl start ficio-updater       — check for updates now"
 echo "  sudo systemctl disable ficio-kiosk       — disable kiosk on boot"
 echo "  sudo systemctl enable ficio-kiosk        — re-enable kiosk on boot"
+echo "  sudo $INSTALL_DIR/deploy/restart-ficio-services.sh — cold-restart kiosk+api"
 echo ""
 echo " Kiosk will launch automatically on next reboot."
 echo " To launch it now:  sudo systemctl start ficio-kiosk"
