@@ -13,6 +13,7 @@ import os
 import cv2
 import numpy as np
 import importlib
+import inspect
 from typing import Dict, Optional
 import logging
 from datetime import datetime
@@ -65,6 +66,7 @@ class CameraManager:
         self.model_status = {"yolo": False, "efficientnet": False}
         self._loaded_model_keys = {"yolo": None, "efficientnet": None}
         self._active_vegetable_id = None
+        # Cache is process-lifetime only; model file updates require service restart.
         self._model_cache = {}
 
         # Preload configured CV models at startup so failures are visible early.
@@ -283,7 +285,8 @@ class CameraManager:
             return result
 
         # 5. Real camera path — validate model files / load status before inference
-        self._ensure_models_loaded(vegetable_config)
+        if self._active_vegetable_id != vegetable_config.id or not self.models_ready:
+            self._ensure_models_loaded(vegetable_config)
 
         # Run YOLO detection
         yolo_result = self._run_yolo_detection(frame, vegetable_config)
@@ -318,7 +321,7 @@ class CameraManager:
         yolo_path = models_path / vegetable_config.yolo_weights
         efficientnet_path = models_path / vegetable_config.efficientnet_weights
         self._active_vegetable_id = vegetable_config.id
-        cache_key = vegetable_config.id
+        cache_key = f"{vegetable_config.id}:{vegetable_config.yolo_weights}:{vegetable_config.efficientnet_weights}"
         if cache_key in self._model_cache:
             cached = self._model_cache[cache_key]
             self.yolo_model = cached.get("yolo_model")
@@ -358,7 +361,14 @@ class CameraManager:
         if self.model_status["efficientnet"] and self._loaded_model_keys["efficientnet"] != efficientnet_key:
             try:
                 torch = importlib.import_module("torch")
-                self.efficientnet_model = torch.load(str(efficientnet_path), map_location="cpu")
+                load_sig = inspect.signature(torch.load)
+                if "weights_only" not in load_sig.parameters:
+                    raise RuntimeError("torch.load missing weights_only support; refusing unsafe checkpoint load")
+                self.efficientnet_model = torch.load(
+                    str(efficientnet_path),
+                    map_location="cpu",
+                    weights_only=True
+                )
                 # Torch checkpoints may contain wrapper dicts; keep raw object and
                 # handle structure in inference path.
                 if hasattr(self.efficientnet_model, "eval"):
@@ -409,7 +419,7 @@ class CameraManager:
         # TODO: Implement actual YOLO inference
         # Placeholder implementation
         
-        self.logger.debug(f"Running YOLO detection (placeholder) for {vegetable_config.name}...")
+        self.logger.debug(f"Running YOLO detection for {vegetable_config.name}...")
         
         if not self.model_status["yolo"] or self.yolo_model is None:
             return {
@@ -491,7 +501,7 @@ class CameraManager:
         # TODO: Implement actual EfficientNet inference
         # Placeholder implementation
         
-        self.logger.debug(f"Running EfficientNet classification (placeholder) for {vegetable_config.name}...")
+        self.logger.debug(f"Running EfficientNet classification for {vegetable_config.name}...")
         
         if not self.model_status["efficientnet"] or self.efficientnet_model is None:
             return {
@@ -501,10 +511,13 @@ class CameraManager:
             }
         try:
             torch = importlib.import_module("torch")
-            # Minimal preprocessing (BGR->RGB, resize, normalize to [0,1])
+            # EfficientNet preprocessing (ImageNet normalization expected by standard checkpoints)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             resized = cv2.resize(rgb, (224, 224))
             tensor = torch.from_numpy(resized).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            mean = torch.tensor([0.485, 0.456, 0.406], dtype=tensor.dtype).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], dtype=tensor.dtype).view(1, 3, 1, 1)
+            tensor = (tensor - mean) / std
 
             model_obj = self.efficientnet_model
             if isinstance(model_obj, dict):
@@ -522,13 +535,22 @@ class CameraManager:
                 logits = logits.squeeze()
             probs = torch.sigmoid(logits) if logits.ndim == 0 else torch.softmax(logits, dim=-1)
 
+            healthy_class_index = self.config.get_int('cv_healthy_class_index', 1)
             if probs.ndim == 0:
                 p_healthy = float(probs.item())
             else:
                 if probs.shape[-1] < 2:
                     p_healthy = float(probs.flatten()[0].item())
                 else:
-                    p_healthy = float(probs.flatten()[-1].item())
+                    flat_probs = probs.flatten()
+                    if healthy_class_index < 0 or healthy_class_index >= flat_probs.shape[0]:
+                        self.logger.error(
+                            "Invalid cv_healthy_class_index=%s for probs shape=%s; defaulting",
+                            healthy_class_index,
+                            tuple(flat_probs.shape)
+                        )
+                        healthy_class_index = 1 if flat_probs.shape[0] > 1 else 0
+                    p_healthy = float(flat_probs[healthy_class_index].item())
             healthy = p_healthy >= 0.5
             confidence = p_healthy if healthy else (1.0 - p_healthy)
         except Exception as e:
@@ -565,7 +587,7 @@ class CameraManager:
         Returns:
             Final decision dictionary
         """
-        self.logger.info(
+        self.logger.debug(
             "CV decision inputs: yolo=%s eff=%s grading_mode=%s",
             yolo_result,
             efficientnet_result,
@@ -585,7 +607,7 @@ class CameraManager:
         # Check multi-object/no-label fallback to EfficientNet
         if yolo_result.get('object_count', 1) != 1 or not yolo_result.get('label'):
             eff_healthy = efficientnet_result['healthy']
-            self.logger.info(
+            self.logger.debug(
                 "YOLO ambiguous (object_count=%s, label=%s) -> following EfficientNet=%s",
                 yolo_result.get('object_count'),
                 yolo_result.get('label'),
@@ -647,7 +669,7 @@ class CameraManager:
             'reason': reason,
             'models_agree': models_agree
         }
-        self.logger.info("CV final decision: %s", final)
+        self.logger.debug("CV final decision: %s", final)
         return final
     
     def is_ready(self) -> bool:
