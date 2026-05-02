@@ -90,6 +90,10 @@ sudo -u "$FICIO_USER" "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/re
 
 # ── 8. Cold-restart API/kiosk stack and health check ────────────────────────
 log "Cold-restarting API/kiosk services..."
+if [ ! -x "$INSTALL_DIR/deploy/restart-ficio-services.sh" ]; then
+    log_err "restart-ficio-services.sh not found or not executable"
+    exit 1
+fi
 "$INSTALL_DIR/deploy/restart-ficio-services.sh"
 
 log "Waiting for health check..."

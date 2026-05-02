@@ -17,6 +17,7 @@ import serial
 import threading
 import time
 import logging
+import traceback
 from typing import Optional, Callable, Dict
 from dataclasses import dataclass
 from enum import IntEnum
@@ -152,6 +153,7 @@ class RaspiCommsManager:
         self.rx_thread_healthy: bool = False
         self.rx_thread_heartbeat: float = 0.0
         self.rx_thread_last_exception: Optional[str] = None
+        self.rx_thread_last_traceback: Optional[str] = None
         
         # Response handling
         self.response_lock = threading.Lock()
@@ -212,6 +214,7 @@ class RaspiCommsManager:
             self._gate_at_c_gate_id = 0
             self.rx_thread_heartbeat = time.time()
             self.rx_thread_last_exception = None
+            self.rx_thread_last_traceback = None
             self.rx_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self.rx_thread.start()
 
@@ -219,7 +222,7 @@ class RaspiCommsManager:
             ping_param1 = ProtocolConstants.PING_ECHO_PARAM1
             ping_param2 = ProtocolConstants.PING_ECHO_PARAM2
             expected_echo = (ping_param1 << 8) | ping_param2
-            ping_response = None
+            handshake_ok = False
             for attempt in range(1, 4):
                 ping_response = self.send_command(
                     CommandCode.CMD_PING,
@@ -245,9 +248,10 @@ class RaspiCommsManager:
                     )
                     time.sleep(0.25)
                     continue
+                handshake_ok = True
                 break
 
-            if not ping_response or ping_response.status != ResponseStatus.RESP_OK or ping_response.data != expected_echo:
+            if not handshake_ok:
                 self.logger.error("STM32 startup handshake failed after 3 PING attempts")
                 self.disconnect()
                 return False
@@ -426,9 +430,11 @@ class RaspiCommsManager:
                 
         except serial.SerialException as e:
             self.rx_thread_last_exception = repr(e)
+            self.rx_thread_last_traceback = traceback.format_exc()
             self.logger.exception(f"Serial read error in RX thread: {e}")
         except Exception as e:
             self.rx_thread_last_exception = repr(e)
+            self.rx_thread_last_traceback = traceback.format_exc()
             self.logger.exception("Unhandled exception in RX thread")
         finally:
             with self.response_lock:
