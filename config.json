@@ -16,7 +16,7 @@
     "gate_delay": 0.2,
     "cut_delay": 0.5,
     "max_consecutive_cv_failures": 5,
-    "cv_check_enabled": true
+    "cv_check_enabled": false
   },
   "machine_variant": {
     "active_variant": "mini",
