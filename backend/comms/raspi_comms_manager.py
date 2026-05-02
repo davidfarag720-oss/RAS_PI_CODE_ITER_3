@@ -147,6 +147,8 @@ class RaspiCommsManager:
         self.serial: Optional[serial.Serial] = None
         self.running = False
         self.rx_thread: Optional[threading.Thread] = None
+        self.rx_thread_heartbeat: float = 0.0
+        self.rx_thread_last_exception: Optional[str] = None
         
         # Response handling
         self.response_lock = threading.Lock()
@@ -188,13 +190,47 @@ class RaspiCommsManager:
             time.sleep(3.0)  # Allow serial port to initialize and flush any startup bytes
             
             # Flush any stale data
+            stale_bytes_before = self.serial.in_waiting
+            if stale_bytes_before:
+                self.logger.warning(f"Flushing {stale_bytes_before} stale RX bytes at connect()")
             self.serial.reset_input_buffer()
+            # Repeat once in case bytes arrive during first flush (common on MCU boot chatter)
+            time.sleep(0.05)
+            stale_bytes_after = self.serial.in_waiting
+            if stale_bytes_after:
+                self.logger.warning(f"Flushing additional {stale_bytes_after} RX bytes after settle delay")
+                self.serial.reset_input_buffer()
             self.serial.reset_output_buffer()
             
             # Start receiver thread
             self.running = True
+            self._gate_at_c_event.clear()
+            self._gate_at_c_gate_id = 0
+            self.rx_thread_heartbeat = time.time()
+            self.rx_thread_last_exception = None
             self.rx_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self.rx_thread.start()
+
+            # Validate RX path immediately with a ping handshake.
+            ping_param1 = 0xA5
+            ping_param2 = 0x5A
+            ping_response = self.send_command(
+                CommandCode.CMD_PING,
+                ping_param1,
+                ping_param2,
+                wait_response=True,
+                timeout=2.0
+            )
+            if not ping_response:
+                self.logger.error("STM32 startup handshake failed: no PING response within 2.0s")
+                self.disconnect()
+                return False
+            if ping_response.status != ResponseStatus.RESP_OK:
+                self.logger.error(
+                    f"STM32 startup handshake failed: PING returned status=0x{int(ping_response.status):02X}"
+                )
+                self.disconnect()
+                return False
             
             self.logger.info(f"Connected to {self.port} at {self.baudrate} baud")
             return True
@@ -232,6 +268,14 @@ class RaspiCommsManager:
         if not self.serial or not self.serial.is_open:
             self.logger.error("Serial port not open")
             return None
+
+        if wait_response:
+            if not self.rx_thread or not self.rx_thread.is_alive():
+                self.logger.error(
+                    "RX thread is not running; refusing to wait for response. "
+                    f"last_exception={self.rx_thread_last_exception}"
+                )
+                return None
         
         # Build packet
         packet = self._build_packet(cmd, param1, param2)
@@ -296,6 +340,12 @@ class RaspiCommsManager:
         start_time = time.time()
         
         while time.time() - start_time < timeout:
+            if self.rx_thread and not self.rx_thread.is_alive():
+                self.logger.error(
+                    "Response wait aborted because RX thread died. "
+                    f"last_exception={self.rx_thread_last_exception}"
+                )
+                return None
             with self.response_lock:
                 if self.last_response:
                     return self.last_response
@@ -309,13 +359,19 @@ class RaspiCommsManager:
         Background thread that continuously reads and parses incoming packets.
         """
         packet_buffer = bytearray()
+        preview_budget = 3
+        self.logger.info("RX thread started")
         
-        while self.running:
-            try:
+        try:
+            while self.running:
+                self.rx_thread_heartbeat = time.time()
                 # Read available bytes
                 if self.serial.in_waiting > 0:
                     data = self.serial.read(self.serial.in_waiting)
                     packet_buffer.extend(data)
+                    if preview_budget > 0:
+                        self.logger.info(f"RX startup bytes: {data[:16].hex(' ')}")
+                        preview_budget -= 1
                 
                 # Try to parse packets from buffer
                 while len(packet_buffer) >= ProtocolConstants.PACKET_SIZE:
@@ -347,9 +403,20 @@ class RaspiCommsManager:
                 
                 time.sleep(0.001)  # Small delay to prevent CPU spinning
                 
-            except serial.SerialException as e:
-                self.logger.error(f"Serial read error: {e}")
-                time.sleep(0.1)
+        except serial.SerialException as e:
+            self.rx_thread_last_exception = repr(e)
+            self.logger.exception(f"Serial read error in RX thread: {e}")
+            time.sleep(0.1)
+        except Exception as e:
+            self.rx_thread_last_exception = repr(e)
+            self.logger.exception("Unhandled exception in RX thread")
+        finally:
+            self.running = False
+            self.logger.error(
+                "RX thread exiting. "
+                f"last_exception={self.rx_thread_last_exception} "
+                f"buffer_len={len(packet_buffer)}"
+            )
     
     def _process_packet(self, packet: bytes):
         """
