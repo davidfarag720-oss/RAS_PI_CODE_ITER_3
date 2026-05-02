@@ -83,7 +83,13 @@ class CameraManager:
     def _preload_models_on_startup(self):
         """Preload CV models for all configured vegetables during service startup."""
         try:
-            vegetables = self.config.list_vegetables()
+            # Support both ConfigManager access patterns:
+            # - list_vegetables() -> List[VegetableConfig]
+            # - vegetables dict fallback for compatibility with older adapters
+            if hasattr(self.config, "list_vegetables"):
+                vegetables = self.config.list_vegetables()
+            else:
+                vegetables = list(getattr(self.config, "vegetables", {}).values())
             if not vegetables:
                 self.logger.warning("No vegetables configured; skipping CV model preload")
                 return
