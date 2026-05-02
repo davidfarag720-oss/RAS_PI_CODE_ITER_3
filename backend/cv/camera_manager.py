@@ -12,6 +12,8 @@ import asyncio
 import os
 import cv2
 import numpy as np
+import importlib
+import inspect
 from typing import Dict, Optional
 import logging
 from datetime import datetime
@@ -60,12 +62,45 @@ class CameraManager:
         # CV models (loaded on first use)
         self.yolo_model = None
         self.efficientnet_model = None
+        self.models_ready = False
+        self.model_status = {"yolo": False, "efficientnet": False}
+        self._loaded_model_keys = {"yolo": None, "efficientnet": None}
+        self._active_vegetable_id = None
+        # Cache is process-lifetime only; model file updates require service restart.
+        self._model_cache = {}
+
+        # Preload configured CV models at startup so failures are visible early.
+        self._preload_models_on_startup()
         
         self.logger.info(
             f"Camera initialized: index={self.camera_index}, "
             f"resolution={self.width}x{self.height}, "
-            f"stream={self.stream_width}x{self.stream_height}@{self.stream_fps}fps"
+            f"stream={self.stream_width}x{self.stream_height}@{self.stream_fps}fps, "
+            f"cv_grading_mode={self.config.get_str('cv_grading_mode', 'harsh')}, "
+            f"cv_check_enabled={self.config.get_bool('cv_check_enabled', True)}"
         )
+
+    def _preload_models_on_startup(self):
+        """Preload CV models for all configured vegetables during service startup."""
+        try:
+            # Support both ConfigManager access patterns:
+            # - list_vegetables() -> List[VegetableConfig]
+            # - vegetables dict fallback for compatibility with older adapters
+            if hasattr(self.config, "list_vegetables"):
+                vegetables = self.config.list_vegetables()
+            else:
+                vegetables = list(getattr(self.config, "vegetables", {}).values())
+            if not vegetables:
+                self.logger.warning("No vegetables configured; skipping CV model preload")
+                return
+
+            self.logger.info("Preloading CV models on startup...")
+            for veg in vegetables:
+                self.logger.info(f"Preloading models for vegetable={veg.id}")
+                self._ensure_models_loaded(veg)
+            self.logger.info("CV model preload complete")
+        except Exception as e:
+            self.logger.error(f"Startup CV preload failed: {e}", exc_info=True)
 
     def _init_camera(self):
         """Initialize OpenCV camera"""
@@ -126,15 +161,16 @@ class CameraManager:
         """
         if not self.camera or not self.camera.isOpened():
             # Return a mock frame in test mode
-            self.logger.debug("Returning mock frame (no camera)")
+            self.logger.warning("Capture source unavailable; returning mock frame (all zeros)")
             return np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
         ret, frame = self.camera.read()
 
         if not ret or frame is None:
             # Return mock frame on capture failure
-            self.logger.warning("Capture failed, returning mock frame")
+            self.logger.error("Capture failed from camera.read(); returning mock frame")
             return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        self.logger.debug(f"Captured frame successfully: shape={frame.shape}, dtype={frame.dtype}")
 
         return frame
     
@@ -254,9 +290,9 @@ class CameraManager:
             result['vegetable_id'] = vegetable_config.id
             return result
 
-        # 5. Real camera path — run model stubs (TODO: implement actual inference)
-        # TODO: Load actual models if not already loaded
-        # self._ensure_models_loaded(vegetable_config)
+        # 5. Real camera path — validate model files / load status before inference
+        if self._active_vegetable_id != vegetable_config.id or not self.models_ready:
+            self._ensure_models_loaded(vegetable_config)
 
         # Run YOLO detection
         yolo_result = self._run_yolo_detection(frame, vegetable_config)
@@ -285,22 +321,85 @@ class CameraManager:
         Args:
             vegetable_config: Vegetable configuration with model paths
         """
-        # TODO: Implement actual model loading
-        # For now, this is a placeholder
-        
         install_path = self.config.get_str('install_path', '/home/dfarag/vegetable-slicer')
         models_path = Path(install_path) / 'models'
         
         yolo_path = models_path / vegetable_config.yolo_weights
         efficientnet_path = models_path / vegetable_config.efficientnet_weights
+        self._active_vegetable_id = vegetable_config.id
+        cache_key = f"{vegetable_config.id}:{vegetable_config.yolo_weights}:{vegetable_config.efficientnet_weights}"
+        if cache_key in self._model_cache:
+            cached = self._model_cache[cache_key]
+            self.yolo_model = cached.get("yolo_model")
+            self.efficientnet_model = cached.get("efficientnet_model")
+            self.model_status = dict(cached.get("model_status", self.model_status))
+            self._loaded_model_keys = dict(cached.get("loaded_keys", self._loaded_model_keys))
+            self.models_ready = all(self.model_status.values())
+            return
         
-        # if self.yolo_model is None:
-        #     self.yolo_model = load_yolo_model(yolo_path)
-        #     self.logger.info(f"Loaded YOLO model: {yolo_path}")
-        
-        # if self.efficientnet_model is None:
-        #     self.efficientnet_model = load_efficientnet_model(efficientnet_path)
-        #     self.logger.info(f"Loaded EfficientNet model: {efficientnet_path}")
+        self.model_status["yolo"] = yolo_path.exists()
+        self.model_status["efficientnet"] = efficientnet_path.exists()
+
+        if self.model_status["yolo"]:
+            self.logger.info(f"YOLO weights found: {yolo_path}")
+        else:
+            self.logger.error(f"YOLO weights missing: {yolo_path}")
+
+        if self.model_status["efficientnet"]:
+            self.logger.info(f"EfficientNet weights found: {efficientnet_path}")
+        else:
+            self.logger.error(f"EfficientNet weights missing: {efficientnet_path}")
+
+        # Load YOLO model object if needed
+        yolo_key = str(yolo_path)
+        if self.model_status["yolo"] and self._loaded_model_keys["yolo"] != yolo_key:
+            try:
+                ultralytics = importlib.import_module("ultralytics")
+                self.yolo_model = ultralytics.YOLO(str(yolo_path))
+                self._loaded_model_keys["yolo"] = yolo_key
+                self.logger.info(f"YOLO model loaded successfully: {yolo_path}")
+            except Exception as e:
+                self.yolo_model = None
+                self.logger.error(f"Failed to load YOLO model from {yolo_path}: {e}", exc_info=True)
+
+        # Load EfficientNet classifier object if needed
+        efficientnet_key = str(efficientnet_path)
+        if self.model_status["efficientnet"] and self._loaded_model_keys["efficientnet"] != efficientnet_key:
+            try:
+                torch = importlib.import_module("torch")
+                load_sig = inspect.signature(torch.load)
+                if "weights_only" not in load_sig.parameters:
+                    raise RuntimeError("torch.load missing weights_only support; refusing unsafe checkpoint load")
+                self.efficientnet_model = torch.load(
+                    str(efficientnet_path),
+                    map_location="cpu",
+                    weights_only=True
+                )
+                # Torch checkpoints may contain wrapper dicts; keep raw object and
+                # handle structure in inference path.
+                if hasattr(self.efficientnet_model, "eval"):
+                    self.efficientnet_model.eval()
+                self._loaded_model_keys["efficientnet"] = efficientnet_key
+                self.logger.info(f"EfficientNet model loaded successfully: {efficientnet_path}")
+            except Exception as e:
+                self.efficientnet_model = None
+                self.logger.error(
+                    f"Failed to load EfficientNet model from {efficientnet_path}: {e}",
+                    exc_info=True
+                )
+
+        self.model_status["yolo"] = self.model_status["yolo"] and (self.yolo_model is not None)
+        self.model_status["efficientnet"] = self.model_status["efficientnet"] and (self.efficientnet_model is not None)
+        self.models_ready = all(self.model_status.values())
+        self._model_cache[cache_key] = {
+            "yolo_model": self.yolo_model,
+            "efficientnet_model": self.efficientnet_model,
+            "model_status": dict(self.model_status),
+            "loaded_keys": dict(self._loaded_model_keys),
+        }
+
+        if not self.models_ready:
+            self.logger.error("CV models are not ready; inference will fail-closed (reject)")
     
     def _run_yolo_detection(
         self,
@@ -326,26 +425,66 @@ class CameraManager:
         # TODO: Implement actual YOLO inference
         # Placeholder implementation
         
-        self.logger.debug(f"Running YOLO detection (placeholder) for {vegetable_config.name}...")
+        self.logger.debug(f"Running YOLO detection for {vegetable_config.name}...")
         
-        # Simulate detection
-        detected = True
-        healthy = True  # Placeholder
-        confidence = 0.85  # Placeholder
-        
-        label = f"{'healthy' if healthy else 'unhealthy'}_{vegetable_config.id}"
-        
-        # Check positioning (simple center-of-frame check for now)
+        if not self.model_status["yolo"] or self.yolo_model is None:
+            return {
+                'detected': False,
+                'label': None,
+                'healthy': False,
+                'confidence': 0.0,
+                'bbox': None,
+                'positioned': False,
+                'object_count': 0,
+                'reason': 'yolo_weights_missing'
+            }
+
         h, w = frame.shape[:2]
-        positioned = True  # Placeholder
+        try:
+            results = self.yolo_model.predict(source=frame, verbose=False)
+            if not results:
+                return {
+                    'detected': False, 'label': None, 'healthy': False, 'confidence': 0.0,
+                    'bbox': None, 'positioned': False, 'object_count': 0, 'reason': 'no_yolo_results'
+                }
+            result = results[0]
+            boxes = getattr(result, "boxes", None)
+            object_count = len(boxes) if boxes is not None else 0
+            if object_count == 0:
+                return {
+                    'detected': False, 'label': None, 'healthy': False, 'confidence': 0.0,
+                    'bbox': None, 'positioned': False, 'object_count': 0, 'reason': 'no_object_detected'
+                }
+            detected = True
+            top_box = boxes[0]
+            conf = float(top_box.conf.item()) if hasattr(top_box, "conf") else 0.0
+            cls_id = int(top_box.cls.item()) if hasattr(top_box, "cls") else -1
+            names = getattr(result, "names", {}) or {}
+            class_name = names.get(cls_id) if isinstance(names, dict) else None
+            label = class_name if class_name else f"class_{cls_id}"
+            # Label convention: healthy_* vs unhealthy_*
+            healthy = label.startswith("healthy")
+            xyxy = top_box.xyxy[0].tolist() if hasattr(top_box, "xyxy") else [0, 0, w, h]
+            x1, y1, x2, y2 = [int(v) for v in xyxy]
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            positioned = (0.2 * w) <= cx <= (0.8 * w) and (0.2 * h) <= cy <= (0.8 * h)
+            confidence = max(0.0, min(1.0, conf))
+        except Exception as e:
+            self.logger.error(f"YOLO inference failed: {e}", exc_info=True)
+            return {
+                'detected': False, 'label': None, 'healthy': False, 'confidence': 0.0,
+                'bbox': None, 'positioned': False, 'object_count': 0, 'reason': 'yolo_inference_error'
+            }
         
         return {
             'detected': detected,
             'label': label,
             'healthy': healthy,
             'confidence': confidence,
-            'bbox': (w//4, h//4, 3*w//4, 3*h//4),  # Placeholder
-            'positioned': positioned
+            'bbox': (x1, y1, x2, y2),
+            'positioned': positioned,
+            'object_count': object_count,
+            'reason': None
         }
     
     def _run_efficientnet_classification(
@@ -368,15 +507,66 @@ class CameraManager:
         # TODO: Implement actual EfficientNet inference
         # Placeholder implementation
         
-        self.logger.debug(f"Running EfficientNet classification (placeholder) for {vegetable_config.name}...")
+        self.logger.debug(f"Running EfficientNet classification for {vegetable_config.name}...")
         
-        # Simulate classification
-        healthy = True  # Placeholder
-        confidence = 0.90  # Placeholder
+        if not self.model_status["efficientnet"] or self.efficientnet_model is None:
+            return {
+                'healthy': False,
+                'confidence': 0.0,
+                'reason': 'efficientnet_weights_missing'
+            }
+        try:
+            torch = importlib.import_module("torch")
+            # EfficientNet preprocessing (ImageNet normalization expected by standard checkpoints)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            resized = cv2.resize(rgb, (224, 224))
+            tensor = torch.from_numpy(resized).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            mean = torch.tensor([0.485, 0.456, 0.406], dtype=tensor.dtype).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], dtype=tensor.dtype).view(1, 3, 1, 1)
+            tensor = (tensor - mean) / std
+
+            model_obj = self.efficientnet_model
+            if isinstance(model_obj, dict):
+                # Common checkpoint patterns
+                for key in ("model", "net", "classifier"):
+                    if key in model_obj:
+                        model_obj = model_obj[key]
+                        break
+            if not hasattr(model_obj, "__call__"):
+                raise RuntimeError("EfficientNet checkpoint did not contain callable model")
+
+            with torch.no_grad():
+                logits = model_obj(tensor)
+            if hasattr(logits, "squeeze"):
+                logits = logits.squeeze()
+            probs = torch.sigmoid(logits) if logits.ndim == 0 else torch.softmax(logits, dim=-1)
+
+            healthy_class_index = self.config.get_int('cv_healthy_class_index', 1)
+            if probs.ndim == 0:
+                p_healthy = float(probs.item())
+            else:
+                if probs.shape[-1] < 2:
+                    p_healthy = float(probs.flatten()[0].item())
+                else:
+                    flat_probs = probs.flatten()
+                    if healthy_class_index < 0 or healthy_class_index >= flat_probs.shape[0]:
+                        self.logger.error(
+                            "Invalid cv_healthy_class_index=%s for probs shape=%s; defaulting",
+                            healthy_class_index,
+                            tuple(flat_probs.shape)
+                        )
+                        healthy_class_index = 1 if flat_probs.shape[0] > 1 else 0
+                    p_healthy = float(flat_probs[healthy_class_index].item())
+            healthy = p_healthy >= 0.5
+            confidence = p_healthy if healthy else (1.0 - p_healthy)
+        except Exception as e:
+            self.logger.error(f"EfficientNet inference failed: {e}", exc_info=True)
+            return {'healthy': False, 'confidence': 0.0, 'reason': 'efficientnet_inference_error'}
         
         return {
             'healthy': healthy,
-            'confidence': confidence
+            'confidence': confidence,
+            'reason': None
         }
     
     def _apply_decision_logic(
@@ -403,6 +593,12 @@ class CameraManager:
         Returns:
             Final decision dictionary
         """
+        self.logger.debug(
+            "CV decision inputs: yolo=%s eff=%s grading_mode=%s",
+            yolo_result,
+            efficientnet_result,
+            grading_mode
+        )
         # Check if YOLO detected object
         if not yolo_result['detected']:
             return {
@@ -414,6 +610,24 @@ class CameraManager:
                 'models_agree': False
             }
         
+        # Check multi-object/no-label fallback to EfficientNet
+        if yolo_result.get('object_count', 1) != 1 or not yolo_result.get('label'):
+            eff_healthy = efficientnet_result['healthy']
+            self.logger.debug(
+                "YOLO ambiguous (object_count=%s, label=%s) -> following EfficientNet=%s",
+                yolo_result.get('object_count'),
+                yolo_result.get('label'),
+                eff_healthy
+            )
+            return {
+                'accepted': eff_healthy,
+                'confidence': efficientnet_result['confidence'],
+                'healthy': eff_healthy,
+                'positioned': yolo_result.get('positioned', False),
+                'reason': None if eff_healthy else 'efficientnet_reject',
+                'models_agree': False
+            }
+
         # Check positioning
         if not yolo_result['positioned']:
             return {
@@ -453,7 +667,7 @@ class CameraManager:
                 accepted = False
                 reason = 'model_disagreement'
         
-        return {
+        final = {
             'accepted': accepted,
             'confidence': avg_confidence,
             'healthy': yolo_healthy if models_agree else False,
@@ -461,6 +675,8 @@ class CameraManager:
             'reason': reason,
             'models_agree': models_agree
         }
+        self.logger.debug("CV final decision: %s", final)
+        return final
     
     def is_ready(self) -> bool:
         """Check if camera is ready"""

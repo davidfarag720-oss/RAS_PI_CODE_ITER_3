@@ -392,6 +392,12 @@ class StandardVegetableWorkflow(BaseWorkflow):
                 - reason: str (if rejected)
         """
         self.logger.info("Running CV analysis...")
+        self.logger.info(
+            "CV check start: bay=%s vegetable=%s grading_mode=%s",
+            self.bay_id,
+            self.vegetable_config.id,
+            self.config.get_str('cv_grading_mode', 'harsh')
+        )
         
         await self._emit_event(WorkflowEvent.CV_CHECK_STARTED)
         
@@ -422,6 +428,7 @@ class StandardVegetableWorkflow(BaseWorkflow):
                     f"CV REJECT: reason={cv_result.get('reason', 'unknown')}, "
                     f"confidence={cv_result['confidence']:.2f}"
                 )
+            self.logger.info("CV full result payload: %s", cv_result)
             
             return cv_result
             
