@@ -14,12 +14,20 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 import logging
+import sys
 import asyncio
 import os
 import cv2
 import json
 from typing import Dict, List, Optional, Set
 from pathlib import Path
+
+# Configure root logger to output to console (captured by systemd journal)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 from backend.api.models import (
     VegetableResponse,

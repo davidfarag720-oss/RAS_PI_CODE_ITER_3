@@ -104,7 +104,9 @@ class ConfigManager:
             
             self.logger.info(
                 f"Configuration loaded: {len(self.vegetables)} vegetables, "
-                f"{len(self.cut_types)} cut types"
+                f"{len(self.cut_types)} cut types, "
+                f"cv_grading_mode={self.system_settings.get('cv_grading_mode', 'harsh')}, "
+                f"cv_check_enabled={self.system_settings.get('cv_check_enabled', True)}"
             )
             
         except FileNotFoundError:
