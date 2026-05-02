@@ -36,6 +36,8 @@ class ProtocolConstants:
     # Start bytes
     START_BYTE_RX = 0xA5  # STM32 sends this
     START_BYTE_TX = 0x5A  # RasPi sends this
+    PING_ECHO_PARAM1 = 0xA5
+    PING_ECHO_PARAM2 = 0x5A
     
     # TX Packet indices (RasPi -> STM32)
     TX_START_IDX = 0
@@ -214,8 +216,8 @@ class RaspiCommsManager:
             self.rx_thread.start()
 
             # Validate RX path with retry-friendly startup ping handshake.
-            ping_param1 = 0xA5
-            ping_param2 = 0x5A
+            ping_param1 = ProtocolConstants.PING_ECHO_PARAM1
+            ping_param2 = ProtocolConstants.PING_ECHO_PARAM2
             expected_echo = (ping_param1 << 8) | ping_param2
             ping_response = None
             for attempt in range(1, 4):
@@ -389,7 +391,7 @@ class RaspiCommsManager:
                     data = self.serial.read(self.serial.in_waiting)
                     packet_buffer.extend(data)
                     if preview_budget > 0:
-                        self.logger.info(f"RX startup bytes: {data[:16].hex(' ')}")
+                        self.logger.debug(f"RX startup bytes: {data[:16].hex(' ')}")
                         preview_budget -= 1
                 
                 # Try to parse packets from buffer
@@ -429,6 +431,8 @@ class RaspiCommsManager:
             self.rx_thread_last_exception = repr(e)
             self.logger.exception("Unhandled exception in RX thread")
         finally:
+            with self.response_lock:
+                self.last_response = None
             self.running = False
             self.rx_thread_healthy = False
             self.logger.error(
